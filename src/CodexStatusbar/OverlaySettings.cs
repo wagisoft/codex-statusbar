@@ -27,7 +27,10 @@ internal enum DisplayField
     CacheHitRate = 1 << 9,
 
     /// <summary>Model output speed. One of the three primary metrics of the collapsed strip.</summary>
-    Tps = 1 << 10
+    Tps = 1 << 10,
+    ContextWindow = 1 << 11,
+    ContextRemaining = 1 << 12,
+    LastTurn = 1 << 13
 }
 
 internal enum CollapsedSlot { Primary, Secondary }
@@ -66,7 +69,7 @@ internal static class DisplayFieldRules
         DisplayField.Total | DisplayField.Input | DisplayField.Output |
         DisplayField.CacheHit | DisplayField.CacheMiss | DisplayField.Context |
         DisplayField.ContextPercent | DisplayField.Reasoning | DisplayField.Thread |
-        DisplayField.CacheHitRate | DisplayField.Tps;
+        DisplayField.CacheHitRate | DisplayField.Tps | DisplayField.ContextWindow | DisplayField.ContextRemaining | DisplayField.LastTurn;
 
     /// <summary>
     /// The three primary metrics, in the order the collapsed strip shows them:
@@ -79,7 +82,7 @@ internal static class DisplayFieldRules
     {
         DisplayField.Total, DisplayField.Input, DisplayField.Output,
         DisplayField.CacheHit, DisplayField.CacheHitRate, DisplayField.CacheMiss, DisplayField.Context,
-        DisplayField.ContextPercent, DisplayField.Reasoning, DisplayField.Thread, DisplayField.Tps
+        DisplayField.ContextPercent, DisplayField.ContextWindow, DisplayField.ContextRemaining, DisplayField.LastTurn, DisplayField.Reasoning, DisplayField.Thread, DisplayField.Tps
     };
 
     public static bool IsSingleSupported(DisplayField field)
@@ -127,7 +130,7 @@ internal sealed class OverlaySettings
         | DisplayField.CacheHitRate
         | DisplayField.CacheMiss
         | DisplayField.Context
-        | DisplayField.ContextPercent;
+        | DisplayField.ContextPercent | DisplayField.ContextWindow | DisplayField.ContextRemaining | DisplayField.LastTurn | DisplayField.Reasoning;
 
     private sealed class PersistedSettings
     {
@@ -171,7 +174,7 @@ internal sealed class OverlaySettings
         public double? OffsetYDip { get; set; }
     }
 
-    public const int CurrentSettingsVersion = 5;
+    public const int CurrentSettingsVersion = 6;
 
     /// <summary>
     /// The gap between the strip's right edge and the Context indicator's left edge, in DIP. The
@@ -305,6 +308,9 @@ internal sealed class OverlaySettings
             settings.AnchorMode = SanitizeAnchorMode(persisted.AnchorMode);
             settings.VisibleFields = DisplayFieldRules.SanitizeVisible(
                 (DisplayField)(persisted.VisibleFields ?? (int)DefaultVisibleFields));
+            if (version < 6)
+                settings.VisibleFields |= DisplayField.ContextWindow | DisplayField.ContextRemaining | DisplayField.LastTurn;
+
             settings.SetCollapsedFields(
                 (DisplayField)(persisted.CollapsedPrimaryField ?? (int)DisplayField.Tps),
                 (DisplayField)(persisted.CollapsedSecondaryField ?? (int)DisplayField.Total));

@@ -264,13 +264,13 @@ internal static class RenderProbe
         Directory.CreateDirectory(directory);
         OverlayPresentation Present(TokenSnapshot value) => OverlayPresentationBuilder.WithChat(
             OverlayPresentationBuilder.Create(value, settings.CollapsedPrimaryField,
-                settings.CollapsedSecondaryField, settings.VisibleFields), binding, value);
+                settings.CollapsedSecondaryField, DisplayFieldRules.SupportedMask), binding, value);
         var original = Present(snapshot);
         var longTitle = Present(snapshot with { Title = new string('W', 1800) });
         if (!original.Variants.SequenceEqual(longTitle.Variants) || original.StatusText is not null)
             throw new InvalidOperationException("The chat title changed the compact presentation.");
 
-        foreach (var (dpi, narrow) in new[] { (96u, false), (144u, true) })
+        foreach (var (dpi, narrow, expanded) in new[] { (96u, false, false), (144u, true, false), (96u, false, true) })
         {
             using var form = new TokenStripForm();
             form.SetTransparentBackground(false);
@@ -282,7 +282,9 @@ internal static class RenderProbe
             if (index < 0 || narrow && index == 0)
                 throw new InvalidOperationException("No suitable compact layout.");
             form.SetCapsuleVariant(index);
-            var layout = CalculateLayout(form, dpi, new IntRect(0, 0, 1600, 900));
+            var layout = CalculateLayout(form, dpi, new IntRect(0, 0, 1600, 900), expanded);
+            if (expanded && layout.State != OverlayVisualState.Expanded)
+                throw new InvalidOperationException("The details did not expand.");
             form.ApplyLayout(layout);
             using var background = new Form
             {
@@ -300,7 +302,7 @@ internal static class RenderProbe
             using var image = new Bitmap(form.Width, form.Height);
             using var graphics = Graphics.FromImage(image);
             graphics.CopyFromScreen(form.Location, Point.Empty, form.Size);
-            image.Save(Path.Combine(directory, $"manual-{dpi}dpi.png"), ImageFormat.Png);
+            image.Save(Path.Combine(directory, expanded ? "manual-details.png" : $"manual-{dpi}dpi.png"), ImageFormat.Png);
             Console.WriteLine($"{dpi} DPI: {form.CurrentCapsuleVariantText}");
         }
     }
@@ -308,7 +310,7 @@ internal static class RenderProbe
     private static OverlayLayoutResult CalculateLayout(
         TokenStripForm form,
         uint dpi,
-        IntRect workingArea)
+        IntRect workingArea, bool expanded = false)
     {
         var host = new CodexWindowInfo(
             (IntPtr)1,
@@ -333,9 +335,9 @@ internal static class RenderProbe
         return OverlayLayoutCalculator.Calculate(new OverlayLayoutRequest(
             host,
             AnchorMode.TitleBarTopRight,
-            RequestExpanded: false,
-            ExpandedRowCount: 0,
-            ShowContextProgress: false,
+            RequestExpanded: expanded,
+            ExpandedRowCount: form.CurrentPresentation.ExpandedRows.Count,
+            ShowContextProgress: form.CurrentPresentation.ShowContextProgress,
             ManualCapsuleTopLeft: new Point(240, 200),
             ScalePercent: ManualAttachmentRules.DefaultScalePercent,
             CapsuleSize: capsuleSize));

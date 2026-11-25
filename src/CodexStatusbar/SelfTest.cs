@@ -80,6 +80,32 @@ internal static class SelfTest
             Check("manual selection", monitor.Poll()?.ThreadId, "explicit-thread");
         }
 
+        Section("extended token statistics");
+        var stats = new RolloutStreamState();
+        void Usage(long total, long input, long output) => stats.ObserveLine(
+            $$$$$"""{"type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":200000,"last_token_usage":{"total_tokens":110000},"total_token_usage":{"total_tokens":{{{{{total}}}}},"input_tokens":{{{{{input}}}}},"output_tokens":{{{{{output}}}}},"cached_input_tokens":3000000000,"reasoning_output_tokens":100}}}}""");
+        Usage(3100000000, 3099999000, 1000);
+        stats.ObserveLine("""{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}""");
+        Usage(3100000100, 3099999050, 1050);
+        Usage(3100000100, 3099999050, 1050);
+        stats.ObserveLine("""{"type":"compacted","payload":{}}""");
+        Check("compaction invalidates the old context", stats.ContextUsedTokens, 0L);
+        Check("compaction preserves cumulative usage", stats.TotalTokens, 3100000100L);
+        stats.ObserveLine("""{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}""");
+        Check("completed turn uses its cumulative delta", stats.LastTurnTokens == 100, true);
+        stats.ObserveLine("""{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}""");
+        Check("duplicate completion preserves the last turn", stats.LastTurnTokens == 100, true);
+
+        Check("reasoning is an output subset", stats.ReasoningOutputTokens, 100L);
+        var extended = new TokenSnapshot("chat", "", stats.TotalTokens, stats.InputTokens, stats.CachedInputTokens,
+            stats.OutputTokens, stats.ReasoningOutputTokens, 0, 200000, default,
+            KnownUsageFields: stats.KnownUsageFields, LastTurnTokens: stats.LastTurnTokens);
+        Check("CLI used excludes cached input", extended.UsedTokens == 100000100, true);
+        Check("full strip has in and out", OverlayPresentationBuilder.BuildCapsuleText(extended).Contains(" in ·"), true);
+        Check("narrow strip keeps used", OverlayPresentationBuilder.BuildCapsuleVariants(extended)[^1].EndsWith(" used"), true);
+        stats.ObserveLine("""{"type":"token_usage_record","payload":{"thread_token_usage":{"total_tokens":3100000200,"input_tokens":3100000100,"output_tokens":100}}}""");
+        Check("missing cache is unavailable", (stats.KnownUsageFields & DisplayField.CacheHit) == 0, true);
+
         Section("deduplication: the same usage must never be counted twice");
         RunDeduplication(stdout);
 

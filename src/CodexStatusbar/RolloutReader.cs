@@ -215,6 +215,7 @@ internal sealed class RolloutReader
 
     private void ResetState()
     {
+        State.ResetUsageMetadata();
         State.InputTokens = 0;
         State.CachedInputTokens = 0;
         State.OutputTokens = 0;

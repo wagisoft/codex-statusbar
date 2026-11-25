@@ -89,7 +89,8 @@ internal static class OverlayPresentationBuilder
             false,
             SanitizeSingleLine(statusText),
             WaitingCapsuleText,
-            BuildCapsuleVariants("--", "--", "--", hasUsage: false));
+            BuildCapsuleVariants(new TokenSnapshot("", "", 0, 0, 0, 0, 0, 0, 0, default,
+                KnownUsageFields: DisplayField.None), visibleFields));
     }
 
     public static OverlayPresentation Create(
@@ -100,7 +101,8 @@ internal static class OverlayPresentationBuilder
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         ValidateHighlightedFields(primaryField, secondaryField);
-        var contextPercent = Math.Clamp(snapshot.ContextPercent, 0, 100);
+        var contextPercent = snapshot.ContextPercent;
+        var variants = BuildCapsuleVariants(snapshot, visibleFields);
         return new OverlayPresentation(
             CreateMetric(snapshot, primaryField, contextPercent),
             CreateMetric(snapshot, secondaryField, contextPercent),
@@ -110,10 +112,10 @@ internal static class OverlayPresentationBuilder
                 secondaryField,
                 field => CreateMetric(snapshot, field, contextPercent)),
             contextPercent,
-            (visibleFields & DisplayField.ContextPercent) != 0,
+            (visibleFields & DisplayField.ContextPercent) != 0 && snapshot.ContextUsedTokens > 0 && snapshot.ContextWindowTokens > 0,
             null,
-            BuildCapsuleVariants(snapshot)[0],
-            BuildCapsuleVariants(snapshot));
+            variants[0],
+            variants);
     }
 
     internal static OverlayPresentation WithChat(OverlayPresentation presentation, ChatBinding binding, TokenSnapshot? snapshot)
@@ -184,38 +186,47 @@ internal static class OverlayPresentationBuilder
             DisplayField.Total => "Total tokens",
             DisplayField.Input => "Input tokens",
             DisplayField.Output => "Output tokens",
-            DisplayField.CacheHit => "Cache hits",
+            DisplayField.CacheHit => "Cached input tokens",
             DisplayField.CacheHitRate => "Cache hit rate",
-            DisplayField.CacheMiss => "Cache misses (calculated)",
+            DisplayField.CacheMiss => "Uncached input tokens",
             DisplayField.Context => "Context usage",
             DisplayField.ContextPercent => "Context percentage",
-            DisplayField.Reasoning => "Reasoning output",
+            DisplayField.Reasoning => "Reasoning output tokens",
+            DisplayField.ContextWindow => "Context window size",
+            DisplayField.ContextRemaining => "Remaining context",
+            DisplayField.LastTurn => "Last completed turn tokens",
             DisplayField.Thread => "Chat ID",
             DisplayField.Tps => "Output speed (tokens/s)",
             _ => throw new ArgumentOutOfRangeException(nameof(field), field, "Unsupported display field.")
         };
     }
 
-    /// <summary>
-    /// The collapsed strip at every verbosity, widest first, as one line each:
-    /// <c>⚡ 243 tok/s · 5.7M tok · Cache 98%</c>.
-    ///
-    /// Total is rendered as <c>input + output</c> — the strict definition — not as the carrier's
-    /// own <c>total_tokens</c> field, so what is displayed is literally the documented formula.
-    /// Cache renders as <c>--</c> when input is 0, never as 0% or NaN. TPS renders as <c>--</c>
-    /// whenever it is unknown, and gains a leading <c>~</c> while it is a held value.
-    /// </summary>
-    public static IReadOnlyList<string> BuildCapsuleVariants(TokenSnapshot snapshot)
+    public static IReadOnlyList<string> BuildCapsuleVariants(TokenSnapshot snapshot,
+        DisplayField fields = DisplayFieldRules.SupportedMask)
     {
-        ArgumentNullException.ThrowIfNull(snapshot);
-        return BuildCapsuleVariants(
-            MetricFormat.FormatTps(snapshot.Tps, snapshot.TpsHeld),
-            MetricFormat.CompactTokens(snapshot.InputTokens + snapshot.OutputTokens),
-            MetricFormat.FormatCachePercentCompact(snapshot.InputTokens, snapshot.CachedInputTokens),
-            snapshot.HasUsage);
+        string Count(long? count) => count is long value ? MetricFormat.CompactTokens(value) : "--";
+        var tps = MetricFormat.FormatTps(snapshot.Tps, snapshot.TpsHeld);
+        var used = Count(snapshot.UsedTokens ?? (snapshot.Has(DisplayField.Total) ? snapshot.TotalTokens : null));
+        var usedLabel = snapshot.UsedTokens.HasValue ? "used" : "total";
+        var input = Count(snapshot.Has(DisplayField.Input) ? snapshot.InputTokens : null);
+        var output = Count(snapshot.Has(DisplayField.Output) ? snapshot.OutputTokens : null);
+        var cache = snapshot.CacheHitPercent?.ToString("0", CultureInfo.InvariantCulture) is string percent
+            ? percent + "%" : "--";
+        string Line(params (DisplayField Field, string Text)[] parts) =>
+            string.Join(Separator, parts.Where(part => (fields & part.Field) != 0).Select(part => part.Text));
+
+        return new[]
+        {
+            Line((DisplayField.Tps, $"⚡ {tps} tok/s"), (DisplayField.Total, $"{used} {usedLabel}"),
+                (DisplayField.Input, $"{input} in"), (DisplayField.Output, $"{output} out"), (DisplayField.CacheHitRate, $"Cache {cache}")),
+            Line((DisplayField.Tps, $"{tps} t/s"), (DisplayField.Total, $"{used} {usedLabel}"),
+                (DisplayField.Input, $"↑{input}"), (DisplayField.Output, $"↓{output}"), (DisplayField.CacheHitRate, cache)),
+            Line((DisplayField.Tps, $"{tps} t/s"), (DisplayField.Total, $"{used} {usedLabel}"), (DisplayField.CacheHitRate, cache)),
+            Line((DisplayField.Total, $"{used} {usedLabel}"), (DisplayField.CacheHitRate, cache)),
+            Line((DisplayField.Total, $"{used} {usedLabel}"))
+        }.Where(line => line.Length > 0).DefaultIfEmpty(WaitingCapsuleText).Distinct().ToArray();
     }
 
-    /// <summary>The widest variant — what the strip shows whenever there is room for it.</summary>
     public static string BuildCapsuleText(TokenSnapshot snapshot) => BuildCapsuleVariants(snapshot)[0];
 
     private static void ValidateHighlightedFields(DisplayField primaryField, DisplayField secondaryField)
@@ -252,23 +263,29 @@ internal static class OverlayPresentationBuilder
         double contextPercent)
     {
         var labels = GetLabels(field);
+        string? Count(long? value) => value?.ToString("N0", CultureInfo.InvariantCulture);
+        var contextKnown = snapshot.ContextUsedTokens > 0;
+        var windowKnown = snapshot.ContextWindowTokens > 0;
         var value = field switch
         {
-            DisplayField.Total => FormatTokenCount(snapshot.TotalTokens),
-            DisplayField.Input => FormatTokenCount(snapshot.InputTokens),
-            DisplayField.Output => FormatTokenCount(snapshot.OutputTokens),
-            DisplayField.CacheHit => FormatTokenCount(snapshot.CachedInputTokens),
-            DisplayField.CacheHitRate => $"{snapshot.CacheHitPercent:0}%",
-            DisplayField.CacheMiss => FormatTokenCount(snapshot.UncachedInputTokens),
-            DisplayField.Context => $"{FormatTokenCount(snapshot.ContextUsedTokens)} / {FormatTokenCount(snapshot.ContextWindowTokens)}",
-            DisplayField.ContextPercent => $"{contextPercent:0}%",
-            DisplayField.Reasoning => FormatTokenCount(snapshot.ReasoningOutputTokens),
-            DisplayField.Thread => ShortThreadId(snapshot.ThreadId),
-            DisplayField.Tps => FormatTpsValue(snapshot),
+            DisplayField.Total => Count(snapshot.Has(field) ? snapshot.TotalTokens : null),
+            DisplayField.Input => Count(snapshot.Has(field) ? snapshot.InputTokens : null),
+            DisplayField.Output => Count(snapshot.Has(field) ? snapshot.OutputTokens : null),
+            DisplayField.CacheHit => Count(snapshot.Has(field) ? snapshot.CachedInputTokens : null),
+            DisplayField.CacheHitRate => snapshot.CacheHitPercent?.ToString("0.##", CultureInfo.InvariantCulture) is string hit ? hit + "%" : null,
+            DisplayField.CacheMiss => Count(snapshot.Has(DisplayField.Input | DisplayField.CacheHit) ? snapshot.UncachedInputTokens : null),
+            DisplayField.Context => Count(contextKnown ? snapshot.ContextUsedTokens : null),
+            DisplayField.ContextWindow => Count(windowKnown ? snapshot.ContextWindowTokens : null),
+            DisplayField.ContextRemaining => Count(contextKnown && windowKnown
+                ? Math.Max(0, snapshot.ContextWindowTokens - snapshot.ContextUsedTokens) : null),
+            DisplayField.ContextPercent => contextKnown && windowKnown ? $"{contextPercent:0}%" : null,
+            DisplayField.LastTurn => Count(snapshot.LastTurnTokens),
+            DisplayField.Reasoning => Count(snapshot.Has(field) ? snapshot.ReasoningOutputTokens : null),
+            DisplayField.Thread => string.IsNullOrWhiteSpace(snapshot.ThreadId) ? null : ShortThreadId(snapshot.ThreadId),
+            DisplayField.Tps => snapshot.Tps is not null ? FormatTpsValue(snapshot) : null,
             _ => throw new ArgumentOutOfRangeException(nameof(field), field, "Unsupported display field.")
         };
-        var hasValue = field != DisplayField.Thread || !string.IsNullOrWhiteSpace(snapshot.ThreadId);
-        return new OverlayMetric(field, labels.Compact, labels.Expanded, value, hasValue);
+        return new OverlayMetric(field, labels.Compact, labels.Expanded, value ?? "N/A", value is not null);
     }
 
     private static (string Compact, string Expanded) GetLabels(DisplayField field)
@@ -276,16 +293,19 @@ internal static class OverlayPresentationBuilder
         return field switch
         {
             DisplayField.Total => ("Total", "Total tokens"),
-            DisplayField.Input => ("In", "Input"),
-            DisplayField.Output => ("Out", "Output"),
-            DisplayField.CacheHit => ("Hits", "Cache hits"),
+            DisplayField.Input => ("In", "Input tokens"),
+            DisplayField.Output => ("Out", "Output tokens"),
+            DisplayField.CacheHit => ("Cached", "Cached input"),
             DisplayField.CacheHitRate => ("Hit rate", "Cache hit rate"),
-            DisplayField.CacheMiss => ("Misses", "Cache misses"),
-            DisplayField.Context => ("Context", "Context usage"),
+            DisplayField.CacheMiss => ("Uncached", "Uncached input"),
+            DisplayField.Context => ("Context", "Current context"),
             DisplayField.ContextPercent => ("Context", "Context utilization"),
             DisplayField.Reasoning => ("Reasoning", "Reasoning output"),
+            DisplayField.ContextWindow => ("Window", "Context window"),
+            DisplayField.ContextRemaining => ("Remaining", "Remaining context"),
+            DisplayField.LastTurn => ("Last turn", "Last turn tokens"),
             DisplayField.Thread => ("Chat", "Chat"),
-            DisplayField.Tps => ("⚡", "Output speed"),
+            DisplayField.Tps => ("⚡", "Generation speed"),
             _ => throw new ArgumentOutOfRangeException(nameof(field), field, "Unsupported display field.")
         };
     }

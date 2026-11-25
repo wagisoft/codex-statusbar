@@ -275,9 +275,15 @@ internal sealed record TokenSnapshot(
     long MergedModelElapsedMs = 0,
     IReadOnlyList<string>? ModelIntervals = null,
     string Carrier = "none",
-    int DedupIgnored = 0, string Project = "")
+    int DedupIgnored = 0, string Project = "", DisplayField KnownUsageFields = DisplayFieldRules.SupportedMask, long? LastTurnTokens = null)
 {
-    public double? CacheHitPercent => MetricFormat.CacheHitPercent(InputTokens, CachedInputTokens);
+    public bool Has(DisplayField fields) => (KnownUsageFields & fields) == fields;
+
+    public long? UsedTokens => Has(DisplayField.Input | DisplayField.CacheHit | DisplayField.Output)
+        && UncachedInputTokens <= long.MaxValue - OutputTokens ? UncachedInputTokens + OutputTokens : null;
+
+    public double? CacheHitPercent => Has(DisplayField.Input | DisplayField.CacheHit)
+        ? MetricFormat.CacheHitPercent(InputTokens, CachedInputTokens) : null;
 
     /// <summary>Cache-hit rate as a plain number for the layout code (0 when undefined).</summary>
     public double CacheHitPercentValue => CacheHitPercent ?? 0d;
@@ -1267,6 +1273,10 @@ internal sealed class TokenLogMonitor : IDisposable
             tracker?.StateDescription ?? "idle",
             tracker?.MergedModelElapsedMs.ToString(CultureInfo.InvariantCulture) ?? "0",
             state?.Carrier ?? "none",
+            state?.KnownUsageFields.ToString(), state?.LastTurnTokens?.ToString(CultureInfo.InvariantCulture),
+            state?.ContextUsedTokens.ToString(CultureInfo.InvariantCulture),
+            state?.ContextWindowTokens.ToString(CultureInfo.InvariantCulture),
+            state?.ReasoningOutputTokens.ToString(CultureInfo.InvariantCulture),
             dedupIgnored.ToString(CultureInfo.InvariantCulture));
 
         if (signature == _cachedSignature && _lastSnapshot is not null)
@@ -1307,7 +1317,8 @@ internal sealed class TokenLogMonitor : IDisposable
             tracker?.MergedModelElapsedMs ?? 0,
             intervals,
             state?.Carrier ?? "none",
-            dedupIgnored, _stateRecord?.Project ?? string.Empty);
+            dedupIgnored, _stateRecord?.Project ?? string.Empty,
+            state?.KnownUsageFields ?? (total > 0 ? DisplayField.Total : DisplayField.None), state?.LastTurnTokens);
         return _lastSnapshot;
     }
 

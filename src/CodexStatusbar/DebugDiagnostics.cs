@@ -527,14 +527,17 @@ internal sealed class DebugDiagnostics
         Append(builder, "Turn:", string.IsNullOrWhiteSpace(snapshot.TurnId) ? "--" : snapshot.TurnId!);
         Append(builder, "Streaming:", snapshot.Streaming ? "true" : "false");
         Append(builder, "TPS state:", snapshot.TpsState);
-        Append(builder, "Input:", snapshot.InputTokens.ToString(CultureInfo.InvariantCulture));
-        Append(builder, "Cached:", snapshot.CachedInputTokens.ToString(CultureInfo.InvariantCulture));
-        Append(builder, "Output:", snapshot.OutputTokens.ToString(CultureInfo.InvariantCulture));
-        Append(
-            builder,
-            "Total:",
-            (snapshot.InputTokens + snapshot.OutputTokens).ToString(CultureInfo.InvariantCulture));
-        Append(builder, "Cache hit:", MetricFormat.FormatCachePercent(snapshot.InputTokens, snapshot.CachedInputTokens));
+        string Number(long? value) => value?.ToString(CultureInfo.InvariantCulture) ?? "N/A";
+        Append(builder, "Input:", Number(snapshot.Has(DisplayField.Input) ? snapshot.InputTokens : null));
+        Append(builder, "Cached:", Number(snapshot.Has(DisplayField.CacheHit) ? snapshot.CachedInputTokens : null));
+        Append(builder, "Output:", Number(snapshot.Has(DisplayField.Output) ? snapshot.OutputTokens : null));
+        Append(builder, "Total:", Number(snapshot.Has(DisplayField.Total) ? snapshot.TotalTokens : null));
+        Append(builder, "Used (CLI):", Number(snapshot.UsedTokens));
+        Append(builder, "Reasoning output:", Number(snapshot.Has(DisplayField.Reasoning) ? snapshot.ReasoningOutputTokens : null));
+        Append(builder, "Current context:", Number(snapshot.ContextUsedTokens > 0 ? snapshot.ContextUsedTokens : null));
+        Append(builder, "Context window:", Number(snapshot.ContextWindowTokens > 0 ? snapshot.ContextWindowTokens : null));
+        Append(builder, "Last completed turn tokens:", Number(snapshot.LastTurnTokens));
+        Append(builder, "Cache hit:", snapshot.CacheHitPercent?.ToString("0.00", CultureInfo.InvariantCulture) is string cache ? cache + "%" : "N/A");
         Append(
             builder,
             "Merged model elapsed ms:",

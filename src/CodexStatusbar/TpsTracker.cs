@@ -485,7 +485,7 @@ internal sealed class TpsTracker
             return;
         }
 
-        _turnOutputFromResponses += outputTokens;
+        _turnOutputFromResponses += Math.Min(outputTokens, long.MaxValue - _turnOutputFromResponses);
     }
 
     /// <summary>Per-response samples dropped because the same response was reported again.</summary>
@@ -639,6 +639,11 @@ internal sealed class RolloutStreamState
     public long InputTokens { get; set; }
 
     public long CachedInputTokens { get; set; }
+    public DisplayField KnownUsageFields { get; private set; }
+    public long? LastTurnTokens { get; private set; }
+    private long? _turnStartTotal;
+    private string? _turnStartId;
+    private string? _lastCompletedUsageTurnId;
 
     public long OutputTokens { get; set; }
 
@@ -723,7 +728,9 @@ internal sealed class RolloutStreamState
                 case "turn_context":
                 case "response_item":
                 case "world_state":
+                    break;
                 case "compacted":
+                    ContextUsedTokens = 0;
                     break;
                 default:
                     Warnings.Add("record:" + recordType);
@@ -794,7 +801,11 @@ internal sealed class RolloutStreamState
     {
         var turnId = GetString(payload, "turn_id");
         CurrentTurnId = turnId;
-        Tps.BeginTurn(turnId, itemsComplete: true, OutputTokens, HasCumulativeUsage);
+        if (turnId is not null && turnId == _turnStartId)
+            return;
+        _turnStartId = turnId;
+        _turnStartTotal = HasRolloutUsage && (KnownUsageFields & DisplayField.Total) != 0 ? TotalTokens : null;
+        Tps.BeginTurn(turnId, itemsComplete: true, OutputTokens, (KnownUsageFields & DisplayField.Output) != 0);
     }
 
     private void ObserveTaskComplete(JsonElement payload)
@@ -806,6 +817,14 @@ internal sealed class RolloutStreamState
         }
 
         Tps.MarkStreaming(false);
+        if (turnId is null || turnId != _lastCompletedUsageTurnId)
+        {
+            LastTurnTokens = turnId is not null && turnId == _turnStartId && _turnStartTotal is long start
+                && (KnownUsageFields & DisplayField.Total) != 0 && TotalTokens > start
+                ? TotalTokens - start : null;
+            _lastCompletedUsageTurnId = turnId;
+            _turnStartId = null;
+        }
         Tps.CompleteTurn(TryGetLong(payload, "duration_ms"), TryGetLong(payload, "time_to_first_token_ms"));
     }
 
@@ -830,7 +849,7 @@ internal sealed class RolloutStreamState
 
         if (info.TryGetProperty("last_token_usage", out var last) && last.ValueKind == JsonValueKind.Object)
         {
-            ContextUsedTokens = ReadRequestSize(last);
+            ContextUsedTokens = GetLong(last, "total_tokens");
 
             var lastOutput = GetLong(last, "output_tokens");
             if (lastOutput > 0)
@@ -878,6 +897,9 @@ internal sealed class RolloutStreamState
             && turnUsage.ValueKind == JsonValueKind.Object
             && payload.TryGetProperty("thread_token_usage", out var threadForCompare)
             && threadForCompare.ValueKind == JsonValueKind.Object
+            && TryGetLong(turnUsage, "output_tokens") is long turnOutput
+            && TryGetLong(threadForCompare, "output_tokens") is long threadOutput
+            && turnOutput >= 0 && turnOutput <= threadOutput
             && !UsageEquals(turnUsage, threadForCompare))
         {
             // Genuinely turn-scoped: use it, because it survives a tail window that missed this
@@ -885,13 +907,12 @@ internal sealed class RolloutStreamState
             // turn_token_usage is a byte-identical COPY of thread_token_usage for every record —
             // treating it as a per-turn value would put the whole conversation's output in the
             // numerator. Hence the equality guard: only a genuinely different value is trusted.
-            Tps.ObserveTurnUsageOutput(GetLong(turnUsage, "output_tokens"));
+            Tps.ObserveTurnUsageOutput(turnOutput);
         }
 
         if (payload.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
         {
-            // "Context used" is the size of the current request, never the conversation total.
-            ContextUsedTokens = ReadRequestSize(usage);
+            // Per-response usage can describe a compaction request. Context comes from token_count.
             Tps.ObserveResponseOutput(ResponseSampleKey(usage), GetLong(usage, "output_tokens"));
         }
 
@@ -937,22 +958,36 @@ internal sealed class RolloutStreamState
 
     private void ApplyCumulativeUsage(JsonElement usage, string carrier)
     {
-        var total = GetLong(usage, "total_tokens");
-        var input = GetLong(usage, "input_tokens");
-        var output = GetLong(usage, "output_tokens");
-        if (total <= 0 && input <= 0 && output <= 0)
+        var inputValue = TryGetLong(usage, "input_tokens");
+        var outputValue = TryGetLong(usage, "output_tokens");
+        var cacheValue = TryGetLong(usage, "cached_input_tokens");
+        var reasoning = TryGetLong(usage, "reasoning_output_tokens");
+        var input = inputValue.GetValueOrDefault();
+        var output = outputValue.GetValueOrDefault();
+        var totalValue = TryGetLong(usage, "total_tokens");
+        if (totalValue is null && inputValue is >= 0 && outputValue is >= 0 && input <= long.MaxValue - output)
+            totalValue = input + output;
+        var total = totalValue.GetValueOrDefault();
+        var known = (inputValue is >= 0 ? DisplayField.Input : 0)
+            | (outputValue is >= 0 ? DisplayField.Output : 0)
+            | (cacheValue is >= 0 && (inputValue is null || cacheValue <= inputValue) ? DisplayField.CacheHit : 0)
+            | (reasoning is >= 0 && (outputValue is null || reasoning <= outputValue) ? DisplayField.Reasoning : 0)
+            | (totalValue is >= 0 ? DisplayField.Total : 0);
+        if (known == DisplayField.None || (HasRolloutUsage && totalValue is >= 0
+            && (KnownUsageFields & DisplayField.Total) != 0 && total < TotalTokens))
         {
             return;
         }
 
-        var cached = GetLong(usage, "cached_input_tokens");
+        var cached = cacheValue.GetValueOrDefault();
 
         // Every carrier here is CUMULATIVE, so the newest reading simply replaces the previous one.
         // Nothing is ever added, which is what makes a duplicate reading harmless — but it is
         // counted and reported so a future Codex change that starts emitting deltas is visible
         // instead of silently corrupting the totals.
         if (HasCumulativeUsage && total == TotalTokens && input == InputTokens
-            && cached == CachedInputTokens && output == OutputTokens)
+            && cached == CachedInputTokens && output == OutputTokens
+            && reasoning.GetValueOrDefault() == ReasoningOutputTokens && known == KnownUsageFields)
         {
             DuplicateUsageReadingsIgnored++;
             return;
@@ -971,10 +1006,11 @@ internal sealed class RolloutStreamState
         InputTokens = input;
         CachedInputTokens = cached;
         OutputTokens = output;
-        ReasoningOutputTokens = GetLong(usage, "reasoning_output_tokens");
+        ReasoningOutputTokens = reasoning.GetValueOrDefault();
+        KnownUsageFields = known;
         HasCumulativeUsage = true;
         HasRolloutUsage = true;
-        Tps.ObserveThreadCumulativeOutput(output, hasCumulative: true);
+        Tps.ObserveThreadCumulativeOutput(output, hasCumulative: (known & DisplayField.Output) != 0);
     }
 
     /// <summary>Applies a baseline recovered from state_5.sqlite when the rollout tail had nothing.</summary>
@@ -987,25 +1023,19 @@ internal sealed class RolloutStreamState
 
         TotalTokens = tokensUsed;
         OutputTokens = 0;
-        InputTokens = tokensUsed;
+        InputTokens = 0;
+        KnownUsageFields = DisplayField.Total;
         CachedInputTokens = 0;
         HasCumulativeUsage = true;
     }
 
-    /// <summary>
-    /// Size of the request that produced a response: <c>total_tokens</c>, falling back to the input
-    /// side when a carrier omits the total. This is "context used", not the conversation total.
-    /// </summary>
-    private static long ReadRequestSize(JsonElement usage)
+    public void ResetUsageMetadata()
     {
-        var total = GetLong(usage, "total_tokens");
-        if (total > 0)
-        {
-            return total;
-        }
-
-        var input = GetLong(usage, "input_tokens");
-        return input > 0 ? input : GetLong(usage, "output_tokens");
+        KnownUsageFields = DisplayField.None;
+        LastTurnTokens = null;
+        _turnStartTotal = null;
+        _turnStartId = null;
+        _lastCompletedUsageTurnId = null;
     }
 
     /// <summary>
