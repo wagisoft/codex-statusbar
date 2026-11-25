@@ -135,6 +135,18 @@ def main():
         assert field(field(renamed, "First"), "Title") == "Renamed chat"
         assert field(field(renamed, "Second"), "Title") == "Statusbar"
         assert field(field(renamed, "First"), "Project") == "OilEmpire"
+        titles = probe("--active-chat-title-probe", "Renamed chat", "unknown title",
+                       "Statusbar", "Identical titles", "Renamed chat")
+        assert [field(item, "ThreadId") for item in titles] == [a, "", b, "", a]
+        assert [field(item, "Source") for item in titles] == [
+            "uia-chat-header", "uia-title-not-indexed", "uia-chat-header", "ambiguous-chat", "uia-chat-header"]
+        assert field(titles[0], "TotalTokens") == 221700
+        assert field(titles[3], "TotalTokens") == 0
+        with sqlite3.connect(database) as db:
+            db.execute("UPDATE threads SET name = ? WHERE id = ?", ("Internal test title", rejected[0]))
+        db.close()
+        assert field(probe("--active-chat-title-probe", "Internal test title")[0], "Source") == "uia-thread-ineligible"
+
         manual = subprocess.run(["dotnet", str(dll), "--no-overlay", "--duration", "1",
                                  "--sessions", str(sessions), "--thread", a],
                                 env=env, check=True, capture_output=True, timeout=30)

@@ -96,6 +96,10 @@ internal static class StateDatabase
                 ReadText(statement, 2), ReadText(statement, 3),
                 sqlite3_column_int64(statement, 4), sqlite3_column_int64(statement, 5) != 0));
 
+    public static IReadOnlyList<string> FindThreadIdsByDisplayTitle(string databasePath, string title) =>
+        Query(databasePath, $"SELECT id FROM threads WHERE ({DisplayTitle(databasePath)}) = $id COLLATE BINARY LIMIT 2",
+            title, statement => ReadText(statement, 0) ?? string.Empty);
+
     public static StateThreadRecord? TryReadSelectableThread(string databasePath, string id) =>
         QuerySingle(databasePath, $"SELECT id, {DisplayTitle(databasePath)}, rollout_path, tokens_used, cwd, git_origin_url FROM threads WHERE id = $id AND {UserChat} LIMIT 1", id);
 

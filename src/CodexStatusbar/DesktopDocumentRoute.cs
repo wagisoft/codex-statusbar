@@ -66,5 +66,5 @@ internal static class DesktopDocumentRoute
     private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string className, string? title);
 
     [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
+    internal static extern IntPtr GetForegroundWindow();
 }

@@ -744,8 +744,7 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
     /// </summary>
     private void AttachSubsystems(CodexProcessInfo info)
     {
-        if (Binding.Mode == ChatBindingMode.Automatic)
-            _routeMonitor.Start();
+
         _monitor ??= CreateMonitor();
         _dockTracker.Enabled = _settings.PositionMode == OverlayPositionMode.ComposerContextLeft;
 
@@ -1476,7 +1475,7 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
                 monitor.ConfigureBinding(binding);
                 if (binding.Mode == ChatBindingMode.Automatic)
                 {
-                    monitor.ObserveDesktopRoute(routeStatus);
+                    monitor.ObserveDesktopRoute();
                 }
                 var snapshot = monitor.Poll();
                 return (
@@ -2474,11 +2473,6 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
         if (!_settings.TrySave(_settingsPath))
             _trayIcon.ShowBalloonTip(3500, "Chat selection", "The selection is active but could not be saved.", ToolTipIcon.Warning);
         InvalidateChatBinding();
-        if (_lifecycle.SubsystemsRunning)
-        {
-            if (Binding.Mode == ChatBindingMode.Automatic) _routeMonitor.Start();
-            else _routeMonitor.Stop();
-        }
         _interaction.CollapseForHostChange();
         StopOutsideClickPolling();
         RefreshPresentation();
@@ -2505,7 +2499,8 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
         if (binding.Mode == ChatBindingMode.Automatic)
         {
             var active = _lastSnapshot?.ThreadId ?? _pendingThreadId;
-            return string.IsNullOrEmpty(active) ? "Automatic · waiting for a verified active chat"
+            return string.IsNullOrEmpty(active) ? (_lastSnapshot?.Source == "ambiguous-chat"
+                ? "Automatic · ambiguous chat name" : "Automatic · active chat unavailable")
                 : "Automatic · " + ChatCaption(active);
         }
 

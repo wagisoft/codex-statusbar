@@ -22,6 +22,30 @@ internal static class ProbeRunner
     {
         LastExitCode = 0;
 
+        if (args.Count >= 3 && args[0] == "--active-chat-title-probe")
+        {
+            var database = StateDatabase.ResolvePathForSessionsRoot(sessionRoot);
+            using var monitor = new TokenLogMonitor(sessionRoot);
+            var results = new List<object>();
+            foreach (var title in args.Skip(2).TakeWhile(arg => arg != "--sessions"))
+            {
+                var (id, reason) = TokenLogMonitor.ResolveHeader(database, title);
+                monitor.ApplyHeaderObservation(id, reason);
+                var snapshot = monitor.Poll();
+                results.Add(new { ThreadId = snapshot?.ThreadId, Source = snapshot?.Source, TotalTokens = snapshot?.TotalTokens });
+            }
+            WriteJson(args[1], results);
+            return true;
+        }
+
+        if (args.Count is 2 or 3 or 4 && args[0] == "--active-chat-probe")
+        {
+            PrepareWindowProbeDpiAwareness();
+            var window = args.Count >= 3 ? new IntPtr(long.Parse(args[2], CultureInfo.InvariantCulture)) : IntPtr.Zero;
+            WriteJson(args[1], ActiveChatProbe.Read(window, sessionRoot, args.Count == 4 ? args[3] : null));
+            return true;
+        }
+
         if (args.Count == 2 && args[0] is "--capture-saved-chat" or "--verify-saved-chat-details")
         {
             PrepareWindowProbeDpiAwareness();

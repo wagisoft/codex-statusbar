@@ -685,7 +685,7 @@ internal static class CodexWindowLocator
             ? GetWindowLongPtr64(windowHandle, index)
             : (IntPtr)GetWindowLong32(windowHandle, index);
 
-    private static bool IsCodexDesktopProcess(uint processId)
+    internal static bool IsCodexDesktopProcess(uint processId)
     {
         var processHandle = OpenProcess(ProcessQueryLimitedInformation, inheritHandle: false, processId);
         if (processHandle == IntPtr.Zero)

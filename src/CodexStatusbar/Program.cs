@@ -895,10 +895,65 @@ internal sealed class TokenLogMonitor : IDisposable
         return Path.GetFullPath(path);
     }
 
-    public void ObserveDesktopRoute(ActiveThreadRouteStatus route)
+    private readonly DesktopChatHeader _desktopHeader = new();
+    private string? _lastHeaderTitle;
+    private string? _headerId;
+    private string _headerReason = "active-chat-unavailable";
+    private long _nextHeaderLookup;
+    private IntPtr _lastHeaderWindow;
+
+    public void ObserveDesktopRoute()
     {
-        var documentId = DesktopDocumentRoute.Read(out var singleForegroundHost);
-        ApplyRoute(route, documentId, singleForegroundHost);
+        var foreground = DesktopDocumentRoute.GetForegroundWindow();
+        var documentId = DesktopDocumentRoute.Read(out _);
+        if (documentId is not null && foreground == DesktopDocumentRoute.GetForegroundWindow())
+        {
+            PreferredThreadId = documentId;
+            _routeSource = "desktop-route";
+            return;
+        }
+
+        PreferredThreadId = null;
+        MissingRouteReason = "active-chat-unavailable";
+        if (!CodexWindowLocator.TryGetForegroundCodexTarget(out var target)
+            || foreground != target.HostWindow.Handle)
+            return;
+
+        var (title, reason) = _desktopHeader.Read(foreground);
+        if (foreground != DesktopDocumentRoute.GetForegroundWindow())
+            return;
+        if (title is null)
+        {
+            _lastHeaderTitle = null;
+            MissingRouteReason = reason;
+            return;
+        }
+
+        if (_lastHeaderWindow != foreground || _lastHeaderTitle != title || Environment.TickCount64 >= _nextHeaderLookup)
+        {
+            _lastHeaderWindow = foreground;
+            _lastHeaderTitle = title;
+            _nextHeaderLookup = Environment.TickCount64 + 2000;
+            (_headerId, _headerReason) = ResolveHeader(_stateDatabasePath, title);
+        }
+        if (foreground != DesktopDocumentRoute.GetForegroundWindow()) return;
+        ApplyHeaderObservation(_headerId, _headerReason);
+    }
+
+    internal void ApplyHeaderObservation(string? id, string reason)
+    {
+        PreferredThreadId = id;
+        _routeSource = "uia-chat-header";
+        MissingRouteReason = reason;
+    }
+
+    internal static (string? Id, string Reason) ResolveHeader(string database, string title)
+    {
+        var ids = StateDatabase.FindThreadIdsByDisplayTitle(database, title);
+        if (ids.Count > 1) return (null, "ambiguous-chat");
+        if (ids.Count == 0) return (null, "uia-title-not-indexed");
+        return StateDatabase.TryReadDesktopUserThread(database, ids[0]) is not null
+            ? (ids[0], "uia-chat-header") : (null, "uia-thread-ineligible");
     }
 
     public void ApplyRoute(ActiveThreadRouteStatus route, string? documentThreadId = null,
@@ -1053,6 +1108,17 @@ internal sealed class TokenLogMonitor : IDisposable
         if (_selectedThreadId?.Equals(threadId, StringComparison.OrdinalIgnoreCase) == true)
         {
             _selectionSource = source;
+            if (!IsForcedPin && DateTime.UtcNow >= _retryAfter)
+            {
+                var updated = StateDatabase.TryReadDesktopUserThread(_stateDatabasePath, threadId);
+                if (updated is null)
+                {
+                    SwitchActiveLog(null, null, "unverified-desktop-session");
+                    return;
+                }
+                _stateRecord = updated;
+                _retryAfter = DateTime.UtcNow.AddSeconds(2);
+            }
             EnsureReader();
             return;
         }
@@ -1068,6 +1134,7 @@ internal sealed class TokenLogMonitor : IDisposable
 
         if (_lastCandidate == threadId && DateTime.UtcNow < _retryAfter)
         {
+            if (_selectedThreadId is not null) SwitchActiveLog(null, null, "unverified-desktop-session");
             return;
         }
         _lastCandidate = threadId;
@@ -1260,6 +1327,7 @@ internal sealed class TokenLogMonitor : IDisposable
             '\u001f',
             threadId,
             _selectionSource,
+            _stateRecord?.Title, _stateRecord?.Project,
             path,
             baselineSource,
             state?.CurrentTurnId ?? string.Empty,
@@ -1365,10 +1433,7 @@ internal static class HeadlessRunner
 {
     public static int Run(CommandLineOptions options)
     {
-        using var routeMonitor = new CodexIpcActiveThreadMonitor();
         var binding = ChatBinding.Resolve(OverlaySettings.Load(options.SettingsPath), options.ForcedThreadId);
-        if (binding.Mode == ChatBindingMode.Automatic)
-            routeMonitor.Start();
         using var monitor = new TokenLogMonitor(options.SessionRoot);
         monitor.ConfigureBinding(binding);
         var diagnostics = new DebugDiagnostics(options.Debug);
@@ -1381,7 +1446,7 @@ internal static class HeadlessRunner
         var lastBlock = string.Empty;
         while (DateTime.UtcNow < deadline)
         {
-            var snapshot = PollAndReport(routeMonitor, monitor, diagnostics, options, previous);
+            var snapshot = PollAndReport(monitor, diagnostics, options, previous);
             var block = DebugDiagnostics.Build(snapshot);
             if (block != lastBlock)
             {
@@ -1392,7 +1457,7 @@ internal static class HeadlessRunner
             Thread.Sleep(500);
         }
 
-        var final = PollAndReport(routeMonitor, monitor, diagnostics, options, previous);
+        var final = PollAndReport(monitor, diagnostics, options, previous);
         var finalBlock = DebugDiagnostics.Build(final);
         if (finalBlock != lastBlock)
         {
@@ -1405,7 +1470,6 @@ internal static class HeadlessRunner
     }
 
     private static TokenSnapshot? PollAndReport(
-        CodexIpcActiveThreadMonitor routeMonitor,
         TokenLogMonitor monitor,
         DebugDiagnostics diagnostics,
         CommandLineOptions options,
@@ -1413,8 +1477,7 @@ internal static class HeadlessRunner
     {
         if (!monitor.PinActiveSession)
         {
-            var route = routeMonitor.GetStatus();
-            monitor.ObserveDesktopRoute(route);
+            monitor.ObserveDesktopRoute();
         }
 
         var snapshot = monitor.Poll();
