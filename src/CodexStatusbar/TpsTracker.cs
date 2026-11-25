@@ -639,6 +639,7 @@ internal sealed class RolloutStreamState
     public long InputTokens { get; set; }
 
     public long CachedInputTokens { get; set; }
+    public UsageLimits? Limits { get; private set; }
     public DisplayField KnownUsageFields { get; private set; }
     public long? LastTurnTokens { get; private set; }
     private long? _turnStartTotal;
@@ -782,6 +783,7 @@ internal sealed class RolloutStreamState
                 ObserveTaskComplete(payload);
                 break;
             case "token_count":
+                Limits = UsageLimits.Read(root, payload, Limits);
                 ObserveTokenCount(payload);
                 break;
             case "item_completed":
@@ -1031,6 +1033,7 @@ internal sealed class RolloutStreamState
 
     public void ResetUsageMetadata()
     {
+        Limits = null;
         KnownUsageFields = DisplayField.None;
         LastTurnTokens = null;
         _turnStartTotal = null;

@@ -1406,6 +1406,10 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
 
             UpdateSessionMenuText();
         }
+        else if (_limitClockKey != GetLimitClockKey())
+        {
+            RefreshPresentation();
+        }
 
         if (_manualAttachment.IsEditing)
         {
@@ -1501,8 +1505,11 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
             }, CancellationToken.None, TaskContinuationOptions.None, uiScheduler);
     }
 
+    private string? _limitClockKey;
+
     private void RefreshPresentation()
     {
+        _limitClockKey = GetLimitClockKey();
         _presentation = _lastSnapshot is null
             ? OverlayPresentationBuilder.CreateWaiting(
                 ChatStatus(),
@@ -1517,6 +1524,9 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
         _presentation = OverlayPresentationBuilder.WithChat(_presentation, Binding, _lastSnapshot);
         _form.SetPresentation(_presentation);
     }
+
+    private string? GetLimitClockKey() => (_settings.VisibleFields & DisplayFieldRules.LimitMask) != 0
+        ? _lastSnapshot?.Limits?.DisplayClockKey(DateTimeOffset.UtcNow, _interaction.ShouldPollOutsideClicks, _settings.VisibleFields) : null;
 
     private void ApplyLayout(CodexWindowTarget target)
     {

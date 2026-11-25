@@ -80,6 +80,52 @@ internal static class SelfTest
             Check("manual selection", monitor.Poll()?.ThreadId, "explicit-thread");
         }
 
+        Section("usage limits");
+        var limitState = new RolloutStreamState();
+        void Report(string timestamp, string limits) => limitState.ObserveLine(
+            $$$$$"""{"timestamp":"{{{{{timestamp}}}}}","type":"event_msg","payload":{"type":"token_count","rate_limits":{{{{{limits}}}}} }}""");
+        Report("2025-03-30T00:00:00Z", """{"limit_id":"premium","primary":{"window_minutes":300,"used_percent":1}}""");
+        Check("different limit ID unsupported", limitState.Limits?.MissingStatus == LimitFreshness.Unsupported, true);
+        Report("2025-03-30T00:01:00Z", """
+            {"limit_id":"codex","primary":{"window_minutes":10080,"used_percent":100,"resets_at":1743298800},
+             "secondary":{"window_minutes":300,"used_percent":0,"resets_at":1743298800}}
+            """);
+        var limits = limitState.Limits!;
+        Check("swapped five-hour, zero used", limits.FiveHour!.Remaining, 100, 0);
+        Check("swapped weekly, 100 used", limits.Weekly!.Remaining, 0, 0);
+        var reset = limits.FiveHour.Reset!.Value;
+        Check("valid before reset", limits.FiveHour.Freshness(limits.Recorded, limits.Recorded), LimitFreshness.Valid);
+        Check("stale after 30 minutes", new UsageLimitWindow(20, reset.AddHours(3)).Freshness(limits.Recorded, limits.Recorded.AddMinutes(30)), LimitFreshness.Stale);
+        Check("await fresh data at reset", limits.FiveHour.Freshness(limits.Recorded, reset), LimitFreshness.AwaitingRefresh);
+        Check("await fresh data after reset", limits.FiveHour.Countdown(reset.AddMinutes(1)), "Awaiting refresh");
+        Check("CLI whole percent rounds ties to even", UsageLimitWindow.Percent(62.5), "62%");
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("W. Europe Standard Time");
+        Check("winter reset offset", UsageLimits.LocalTime(DateTimeOffset.Parse("2025-01-04T00:00:00Z"), zone).EndsWith("+01:00"), true);
+        Check("summer reset offset", UsageLimits.LocalTime(DateTimeOffset.Parse("2025-07-04T00:00:00Z"), zone).EndsWith("+02:00"), true);
+        Report("2025-03-30T00:02:00Z", """{"limit_id":"premium","primary":{"window_minutes":300,"used_percent":99}}""");
+        Report("2025-03-30T00:00:00Z", """{"limit_id":"codex","primary":{"window_minutes":300,"used_percent":99}}""");
+        Check("older and foreign snapshots leave codex unchanged", limitState.Limits == limits, true);
+        Report("2025-03-30T00:03:00Z", """
+            {"limit_id":"codex","primary":{"window_minutes":300,"used_percent":-1},
+             "secondary":{"window_minutes":10080,"used_percent":33}}
+            """);
+        Check("newer partial snapshot cannot reuse an older window", limitState.Limits?.FiveHour is null, true);
+        Check("weekly only", limitState.Limits?.Weekly?.Remaining == 67, true);
+        Check("missing reset is unknown", limitState.Limits?.Weekly?.Countdown(reset), "N/A");
+        Check("missing reset means stale", limitState.Limits?.Weekly?.Freshness(limitState.Limits.Recorded, reset) == LimitFreshness.Stale, true);
+        var baseSnapshot = new TokenSnapshot("", "", 10, 10, 0, 0, 0, 0, 0, default, Limits: limits);
+        var limitFields = DisplayField.Total | DisplayFieldRules.LimitMask;
+        var compactVariants = OverlayPresentationBuilder.BuildCapsuleVariants(baseSnapshot, limitFields, limits.Recorded);
+        Check("countdowns appear in the full layout", compactVariants[0].Contains("5h reset"), true);
+        Check("narrow layout drops countdown before percentages", compactVariants[1].Contains("5h reset"), false);
+        Check("weekly flag can be disabled independently", OverlayPresentationBuilder.BuildCapsuleVariants(
+            baseSnapshot, DisplayField.FiveHourLimit, limits.Recorded)[0], "5h 100%");
+        var refreshed = OverlayPresentationBuilder.Create(baseSnapshot, DisplayField.Tps, DisplayField.Total, limitFields, reset);
+        Check("open details can render a reset without a new snapshot", refreshed.ExpandedRows.Any(
+            row => row.ExpandedLabel == "5-hour" && row.Value == "Awaiting refresh"), true);
+        limitState.ResetUsageMetadata();
+        Check("reader reset does not leak limits across bindings", limitState.Limits is null, true);
+
         Section("detail panel survival and CLI context percentage");
         Check("OilEmpire remaining percentage", TokenSnapshot.ContextPercentRemaining(158276, 475000), 68);
         Check("context below baseline", TokenSnapshot.ContextPercentRemaining(1, 475000), 100);

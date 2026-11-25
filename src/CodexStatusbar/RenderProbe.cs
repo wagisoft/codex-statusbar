@@ -278,7 +278,7 @@ internal static class RenderProbe
             form.ApplyTheme(OverlayThemePalette.For(OverlayThemeKind.Dark));
             form.SetPresentation(narrow ? longTitle : original);
             var widths = form.MeasureCapsuleWidthsDip(dpi);
-            var budget = narrow ? Math.Ceiling(widths[^1]) : 600;
+            var budget = narrow ? Math.Ceiling(widths[^1]) : snapshot.Limits is null ? 600 : 850;
             var index = Array.FindIndex(widths, width => width <= budget);
             if (index < 0 || narrow && index == 0)
                 throw new InvalidOperationException("No suitable compact layout.");

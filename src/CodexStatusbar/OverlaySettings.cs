@@ -30,7 +30,11 @@ internal enum DisplayField
     Tps = 1 << 10,
     ContextWindow = 1 << 11,
     ContextRemaining = 1 << 12,
-    LastTurn = 1 << 13
+    LastTurn = 1 << 13,
+    FiveHourLimit = 1 << 14,
+    WeeklyLimit = 1 << 15,
+    FiveHourReset = 1 << 16,
+    WeeklyReset = 1 << 17
 }
 
 internal enum CollapsedSlot { Primary, Secondary }
@@ -65,7 +69,10 @@ internal enum OverlayThemePreference
 
 internal static class DisplayFieldRules
 {
-    public const DisplayField SupportedMask =
+    public const DisplayField LimitMask = DisplayField.FiveHourLimit | DisplayField.WeeklyLimit
+        | DisplayField.FiveHourReset | DisplayField.WeeklyReset;
+
+    public const DisplayField SupportedMask = LimitMask |
         DisplayField.Total | DisplayField.Input | DisplayField.Output |
         DisplayField.CacheHit | DisplayField.CacheMiss | DisplayField.Context |
         DisplayField.ContextPercent | DisplayField.Reasoning | DisplayField.Thread |
@@ -82,7 +89,8 @@ internal static class DisplayFieldRules
     {
         DisplayField.Total, DisplayField.Input, DisplayField.Output,
         DisplayField.CacheHit, DisplayField.CacheHitRate, DisplayField.CacheMiss, DisplayField.Context,
-        DisplayField.ContextPercent, DisplayField.ContextWindow, DisplayField.ContextRemaining, DisplayField.LastTurn, DisplayField.Reasoning, DisplayField.Thread, DisplayField.Tps
+        DisplayField.ContextPercent, DisplayField.ContextWindow, DisplayField.ContextRemaining, DisplayField.LastTurn, DisplayField.Reasoning, DisplayField.Thread, DisplayField.Tps,
+        DisplayField.FiveHourLimit, DisplayField.WeeklyLimit, DisplayField.FiveHourReset, DisplayField.WeeklyReset
     };
 
     public static bool IsSingleSupported(DisplayField field)
@@ -130,7 +138,7 @@ internal sealed class OverlaySettings
         | DisplayField.CacheHitRate
         | DisplayField.CacheMiss
         | DisplayField.Context
-        | DisplayField.ContextPercent | DisplayField.ContextWindow | DisplayField.ContextRemaining | DisplayField.LastTurn | DisplayField.Reasoning;
+        | DisplayField.ContextPercent | DisplayField.ContextWindow | DisplayField.ContextRemaining | DisplayField.LastTurn | DisplayField.Reasoning | DisplayField.FiveHourLimit | DisplayField.WeeklyLimit;
 
     private sealed class PersistedSettings
     {
@@ -174,7 +182,7 @@ internal sealed class OverlaySettings
         public double? OffsetYDip { get; set; }
     }
 
-    public const int CurrentSettingsVersion = 6;
+    public const int CurrentSettingsVersion = 7;
 
     /// <summary>
     /// The gap between the strip's right edge and the Context indicator's left edge, in DIP. The
@@ -308,6 +316,8 @@ internal sealed class OverlaySettings
             settings.AnchorMode = SanitizeAnchorMode(persisted.AnchorMode);
             settings.VisibleFields = DisplayFieldRules.SanitizeVisible(
                 (DisplayField)(persisted.VisibleFields ?? (int)DefaultVisibleFields));
+            if (version < 7)
+                settings.VisibleFields |= DisplayField.FiveHourLimit | DisplayField.WeeklyLimit;
             if (version < 6)
                 settings.VisibleFields |= DisplayField.ContextWindow | DisplayField.ContextRemaining | DisplayField.LastTurn;
 

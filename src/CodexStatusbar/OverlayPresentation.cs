@@ -7,7 +7,7 @@ internal sealed record OverlayMetric(
     string CompactLabel,
     string ExpandedLabel,
     string Value,
-    bool HasValue);
+    bool HasValue, double? RemainingBar = null, bool ShowLimitBar = false);
 
 internal sealed record OverlayPresentation(
     OverlayMetric Primary,
@@ -84,7 +84,8 @@ internal static class OverlayPresentationBuilder
         return new OverlayPresentation(
             CreateWaitingMetric(primaryField),
             CreateWaitingMetric(secondaryField),
-            CreateExpandedRows(visibleFields, primaryField, secondaryField, CreateWaitingMetric),
+            UsageRows(null, visibleFields, DateTimeOffset.UtcNow).Concat(
+                CreateExpandedRows(visibleFields, primaryField, secondaryField, CreateWaitingMetric)).ToArray(),
             0,
             false,
             SanitizeSingleLine(statusText),
@@ -97,20 +98,19 @@ internal static class OverlayPresentationBuilder
         TokenSnapshot snapshot,
         DisplayField primaryField,
         DisplayField secondaryField,
-        DisplayField visibleFields)
+        DisplayField visibleFields, DateTimeOffset? clock = null)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         ValidateHighlightedFields(primaryField, secondaryField);
         var contextPercent = snapshot.ContextPercent;
-        var variants = BuildCapsuleVariants(snapshot, visibleFields);
+        var now = clock ?? DateTimeOffset.UtcNow;
+        var variants = BuildCapsuleVariants(snapshot, visibleFields, now);
         return new OverlayPresentation(
             CreateMetric(snapshot, primaryField, contextPercent),
             CreateMetric(snapshot, secondaryField, contextPercent),
-            CreateExpandedRows(
-                visibleFields,
-                primaryField,
-                secondaryField,
-                field => CreateMetric(snapshot, field, contextPercent)),
+            UsageRows(snapshot.Limits, visibleFields, now).Concat(
+                CreateExpandedRows(visibleFields, primaryField, secondaryField,
+                    field => CreateMetric(snapshot, field, contextPercent))).ToArray(),
             contextPercent,
             (visibleFields & DisplayField.ContextPercent) != 0 && snapshot.ContextUsedTokens > 0 && snapshot.ContextWindowTokens > 0,
             null,
@@ -195,6 +195,10 @@ internal static class OverlayPresentationBuilder
             DisplayField.ContextWindow => "Context window size",
             DisplayField.ContextRemaining => "Remaining context",
             DisplayField.LastTurn => "Last completed turn tokens",
+            DisplayField.FiveHourLimit => "5-hour remaining",
+            DisplayField.WeeklyLimit => "Weekly remaining",
+            DisplayField.FiveHourReset => "5-hour reset countdown",
+            DisplayField.WeeklyReset => "Weekly reset countdown",
             DisplayField.Thread => "Chat ID",
             DisplayField.Tps => "Output speed (tokens/s)",
             _ => throw new ArgumentOutOfRangeException(nameof(field), field, "Unsupported display field.")
@@ -202,7 +206,7 @@ internal static class OverlayPresentationBuilder
     }
 
     public static IReadOnlyList<string> BuildCapsuleVariants(TokenSnapshot snapshot,
-        DisplayField fields = DisplayFieldRules.SupportedMask)
+        DisplayField fields = DisplayFieldRules.SupportedMask, DateTimeOffset? clock = null)
     {
         string Count(long? count) => count is long value ? MetricFormat.CompactTokens(value) : "--";
         var tps = MetricFormat.FormatTps(snapshot.Tps, snapshot.TpsHeld);
@@ -215,13 +219,37 @@ internal static class OverlayPresentationBuilder
         string Line(params (DisplayField Field, string Text)[] parts) =>
             string.Join(Separator, parts.Where(part => (fields & part.Field) != 0).Select(part => part.Text));
 
+        var now = clock ?? DateTimeOffset.UtcNow;
+        var five = snapshot.Limits?.FiveHour;
+        var week = snapshot.Limits?.Weekly;
+        string Remaining(UsageLimitWindow? window) => window is null ? "N/A"
+            : window.Freshness(snapshot.Limits!.Recorded, now) switch
+            {
+                LimitFreshness.AwaitingRefresh => "wait",
+                LimitFreshness.Stale => "~" + UsageLimitWindow.Percent(window.Remaining),
+                _ => UsageLimitWindow.Percent(window.Remaining)
+            };
+        string Clock(UsageLimitWindow? window) => window?.Countdown(now) is { } countdown && countdown != "Awaiting refresh"
+            ? countdown : window is null ? "N/A" : "wait";
+        var fiveText = "5h " + Remaining(five);
+        var weekText = "W " + Remaining(week);
+        var full = Line((DisplayField.Tps, $"⚡ {tps} tok/s"), (DisplayField.Total, $"{used} {usedLabel}"),
+            (DisplayField.Input, $"{input} in"), (DisplayField.Output, $"{output} out"),
+            (DisplayField.CacheHitRate, $"Cache {cache}"), (DisplayField.FiveHourLimit, fiveText),
+            (DisplayField.WeeklyLimit, weekText), (DisplayField.FiveHourReset, "5h reset " + Clock(five)),
+            (DisplayField.WeeklyReset, "W reset " + Clock(week)));
         return new[]
         {
+            full,
             Line((DisplayField.Tps, $"⚡ {tps} tok/s"), (DisplayField.Total, $"{used} {usedLabel}"),
-                (DisplayField.Input, $"{input} in"), (DisplayField.Output, $"{output} out"), (DisplayField.CacheHitRate, $"Cache {cache}")),
+                (DisplayField.Input, $"{input} in"), (DisplayField.Output, $"{output} out"),
+                (DisplayField.CacheHitRate, $"Cache {cache}"), (DisplayField.FiveHourLimit, fiveText), (DisplayField.WeeklyLimit, weekText)),
             Line((DisplayField.Tps, $"{tps} t/s"), (DisplayField.Total, $"{used} {usedLabel}"),
-                (DisplayField.Input, $"↑{input}"), (DisplayField.Output, $"↓{output}"), (DisplayField.CacheHitRate, cache)),
-            Line((DisplayField.Tps, $"{tps} t/s"), (DisplayField.Total, $"{used} {usedLabel}"), (DisplayField.CacheHitRate, cache)),
+                (DisplayField.Input, $"↑{input}"), (DisplayField.Output, $"↓{output}"),
+                (DisplayField.CacheHitRate, cache), (DisplayField.FiveHourLimit, fiveText), (DisplayField.WeeklyLimit, weekText)),
+            Line((DisplayField.Tps, $"{tps} t/s"), (DisplayField.Total, $"{used} {usedLabel}"),
+                (DisplayField.CacheHitRate, cache), (DisplayField.FiveHourLimit, fiveText), (DisplayField.WeeklyLimit, weekText)),
+            Line((DisplayField.Total, $"{used} {usedLabel}"), (DisplayField.FiveHourLimit, fiveText), (DisplayField.WeeklyLimit, weekText)),
             Line((DisplayField.Total, $"{used} {usedLabel}"), (DisplayField.CacheHitRate, cache)),
             Line((DisplayField.Total, $"{used} {usedLabel}"))
         }.Where(line => line.Length > 0).DefaultIfEmpty(WaitingCapsuleText).Distinct().ToArray();
@@ -245,10 +273,37 @@ internal static class OverlayPresentationBuilder
         Func<DisplayField, OverlayMetric> createMetric)
     {
         return DisplayFieldRules.Ordered
-            .Where(field => (visibleFields & field) != 0)
+            .Where(field => (visibleFields & field) != 0 && (DisplayFieldRules.LimitMask & field) == 0)
             .Where(field => field != primaryField && field != secondaryField)
             .Select(createMetric)
             .ToArray();
+    }
+
+    private static IEnumerable<OverlayMetric> UsageRows(UsageLimits? limits, DisplayField fields, DateTimeOffset now)
+    {
+        if ((fields & DisplayFieldRules.LimitMask) == 0) yield break;
+        OverlayMetric Row(string label, string value, double? bar = null, bool showBar = false) =>
+            new(DisplayField.FiveHourLimit, label, label, value, value != "N/A", bar, showBar);
+        yield return Row("Usage limits", limits is null || limits.MissingStatus == LimitFreshness.Unsupported ? "N/A" : UsageLimits.Id);
+        foreach (var (label, window, mask) in new[]
+        {
+            ("5-hour", limits?.FiveHour, DisplayField.FiveHourLimit | DisplayField.FiveHourReset),
+            ("Weekly", limits?.Weekly, DisplayField.WeeklyLimit | DisplayField.WeeklyReset)
+        })
+        {
+            if ((fields & mask) == 0) continue;
+            var status = window?.Freshness(limits!.Recorded, now) ?? limits?.MissingStatus ?? LimitFreshness.Unavailable;
+            var known = window is not null;
+            yield return Row(label, UsageLimits.Status(status));
+            yield return Row(status is LimitFreshness.AwaitingRefresh or LimitFreshness.Stale ? "Last left / used" : "Remaining / used", known
+                ? $"{UsageLimitWindow.Percent(window!.Remaining)} / {UsageLimitWindow.Percent(window.Used)}"
+                : "N/A", known && status != LimitFreshness.AwaitingRefresh ? window!.Remaining : null, showBar: true);
+            yield return Row("Resets in", window?.Countdown(now) ?? "N/A");
+            yield return Row("Local reset", UsageLimits.LocalTime(window?.Reset));
+        }
+        yield return Row("Source", limits is not null ? UsageLimits.Source : "N/A");
+        yield return Row("Last valid update", UsageLimits.LocalTime(limits?.LastValid));
+        yield return Row("Valid snapshot age", limits?.LastValid is not null ? limits.Age(now) : "N/A");
     }
 
     private static OverlayMetric CreateWaitingMetric(DisplayField field)
@@ -280,6 +335,7 @@ internal static class OverlayPresentationBuilder
                 ? Math.Max(0, snapshot.ContextWindowTokens - snapshot.ContextUsedTokens) : null),
             DisplayField.ContextPercent => contextKnown && windowKnown ? $"{contextPercent:0}%" : null,
             DisplayField.LastTurn => Count(snapshot.LastTurnTokens),
+            DisplayField.FiveHourLimit or DisplayField.WeeklyLimit or DisplayField.FiveHourReset or DisplayField.WeeklyReset => null,
             DisplayField.Reasoning => Count(snapshot.Has(field) ? snapshot.ReasoningOutputTokens : null),
             DisplayField.Thread => string.IsNullOrWhiteSpace(snapshot.ThreadId) ? null : ShortThreadId(snapshot.ThreadId),
             DisplayField.Tps => snapshot.Tps is not null ? FormatTpsValue(snapshot) : null,
@@ -304,6 +360,8 @@ internal static class OverlayPresentationBuilder
             DisplayField.ContextWindow => ("Window", "Context window"),
             DisplayField.ContextRemaining => ("Remaining", "Remaining context"),
             DisplayField.LastTurn => ("Last turn", "Last turn tokens"),
+            DisplayField.FiveHourLimit or DisplayField.WeeklyLimit or DisplayField.FiveHourReset or DisplayField.WeeklyReset
+                => (GetFieldMenuText(field), GetFieldMenuText(field)),
             DisplayField.Thread => ("Chat", "Chat"),
             DisplayField.Tps => ("⚡", "Generation speed"),
             _ => throw new ArgumentOutOfRangeException(nameof(field), field, "Unsupported display field.")

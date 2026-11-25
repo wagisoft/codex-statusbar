@@ -275,7 +275,7 @@ internal sealed record TokenSnapshot(
     long MergedModelElapsedMs = 0,
     IReadOnlyList<string>? ModelIntervals = null,
     string Carrier = "none",
-    int DedupIgnored = 0, string Project = "", DisplayField KnownUsageFields = DisplayFieldRules.SupportedMask, long? LastTurnTokens = null)
+    int DedupIgnored = 0, string Project = "", DisplayField KnownUsageFields = DisplayFieldRules.SupportedMask, long? LastTurnTokens = null, UsageLimits? Limits = null)
 {
     public bool Has(DisplayField fields) => (KnownUsageFields & fields) == fields;
 
@@ -1281,6 +1281,7 @@ internal sealed class TokenLogMonitor : IDisposable
             tracker?.StateDescription ?? "idle",
             tracker?.MergedModelElapsedMs.ToString(CultureInfo.InvariantCulture) ?? "0",
             state?.Carrier ?? "none",
+            state?.Limits?.ToString(),
             state?.KnownUsageFields.ToString(), state?.LastTurnTokens?.ToString(CultureInfo.InvariantCulture),
             state?.ContextUsedTokens.ToString(CultureInfo.InvariantCulture),
             state?.ContextWindowTokens.ToString(CultureInfo.InvariantCulture),
@@ -1326,7 +1327,7 @@ internal sealed class TokenLogMonitor : IDisposable
             intervals,
             state?.Carrier ?? "none",
             dedupIgnored, _stateRecord?.Project ?? string.Empty,
-            state?.KnownUsageFields ?? (total > 0 ? DisplayField.Total : DisplayField.None), state?.LastTurnTokens);
+            state?.KnownUsageFields ?? (total > 0 ? DisplayField.Total : DisplayField.None), state?.LastTurnTokens, state?.Limits);
         return _lastSnapshot;
     }
 

@@ -1402,7 +1402,7 @@ internal sealed class TokenStripForm : Form
         Font labelFont,
         Font valueFont)
     {
-        var labelWidth = Math.Max(0, bounds.Width / 2);
+        var labelWidth = metric.Field == DisplayField.FiveHourLimit ? bounds.Width * 2 / 5 : bounds.Width / 2;
         DrawAlignedText(
             graphics,
             metric.ExpandedLabel,
@@ -1411,14 +1411,30 @@ internal sealed class TokenStripForm : Form
             _palette.Label,
             TextAlignment.Near,
             shadow: false);
+        var limitColor = metric.RemainingBar switch
+        {
+            > 30 => Color.SeaGreen,
+            > 10 => Color.Goldenrod,
+            >= 0 => Color.IndianRed,
+            _ => _palette.Label
+        };
         DrawAlignedText(
             graphics,
             metric.Value,
             valueFont,
             new Rectangle(bounds.Left + labelWidth, bounds.Top, bounds.Width - labelWidth, bounds.Height),
-            ValueColorFor(metric),
+            metric.RemainingBar.HasValue ? limitColor : ValueColorFor(metric),
             TextAlignment.Far,
             shadow: false);
+        if (metric.ShowLimitBar)
+        {
+            using var track = new SolidBrush(_palette.Label);
+            using var fill = new SolidBrush(limitColor);
+            var length = Math.Max(0, labelWidth - 8);
+            graphics.FillRectangle(track, bounds.Left, bounds.Bottom - 3, length, 2);
+            graphics.FillRectangle(fill, bounds.Left, bounds.Bottom - 3,
+                (int)(length * metric.RemainingBar.GetValueOrDefault() / 100), 2);
+        }
     }
 
     private Color ValueColorFor(OverlayMetric metric) =>

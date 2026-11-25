@@ -534,6 +534,15 @@ internal sealed class DebugDiagnostics
         Append(builder, "Total:", Number(snapshot.Has(DisplayField.Total) ? snapshot.TotalTokens : null));
         Append(builder, "Used (CLI):", Number(snapshot.UsedTokens));
         Append(builder, "Reasoning output:", Number(snapshot.Has(DisplayField.Reasoning) ? snapshot.ReasoningOutputTokens : null));
+        if (snapshot.Limits is { } limits)
+        {
+            Append(builder, "Limit source:", UsageLimits.Source);
+            Append(builder, "Limit snapshot UTC:", limits.Recorded.ToString("O", CultureInfo.InvariantCulture));
+            var now = DateTimeOffset.UtcNow;
+            foreach (var (label, window) in new[] { ("5-hour", limits.FiveHour), ("Weekly", limits.Weekly) })
+                Append(builder, label + " limit:", window is null ? UsageLimits.Status(limits.MissingStatus)
+                    : FormattableString.Invariant($"{window.Used}% used | {window.Reset:O} | {UsageLimits.Status(window.Freshness(limits.Recorded, now))}"));
+        }
         Append(builder, "Current context:", Number(snapshot.ContextUsedTokens > 0 ? snapshot.ContextUsedTokens : null));
         Append(builder, "Context window:", Number(snapshot.ContextWindowTokens > 0 ? snapshot.ContextWindowTokens : null));
         Append(builder, "Last completed turn tokens:", Number(snapshot.LastTurnTokens));

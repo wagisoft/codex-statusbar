@@ -38,6 +38,12 @@ def main():
                         out.write(b"\n")
                     usage = legacy_records[1:] if legacy else records[1:]
                     out.write(("\n".join(usage).replace(original_id, ident) + "\n").encode())
+                    if large or legacy:
+                        limit_id = "codex" if large else "separate-scope"
+                        event = {"timestamp": "2025-11-25T00:00:00Z", "type": "event_msg",
+                                 "payload": {"type": "token_count", "rate_limits": {"limit_id": limit_id,
+                                             "primary": {"window_minutes": 300, "used_percent": 23}}}}
+                        out.write((json.dumps(event) + "\n").encode())
                 db.execute("INSERT INTO threads(id,title,rollout_path,tokens_used,recency_at_ms) "
                            "VALUES(?,?,?,?,?)", (ident, "Identical titles", str(path), 999, 1))
                 for column, value in metadata.items():
@@ -95,6 +101,10 @@ def main():
             selected = field(catalog_probe, side)
             assert field(selected, "Source") == "manual" and field(selected, "ThreadId") == ident
             assert field(selected, "TotalTokens") == (221700 if ident == a else 5699084)
+        large_limits = field(field(catalog_probe, "First"), "Limits")
+        second_limits = field(field(catalog_probe, "Second"), "Limits")
+        assert field(field(large_limits, "FiveHour"), "Used") == 23
+        assert field(second_limits, "FiveHour") is None
         missing_snapshot = field(catalog_probe, "Missing")
         assert field(missing_snapshot, "ThreadId") == "" and field(missing_snapshot, "TotalTokens") == 0
         assert field(missing_snapshot, "Source") == "manual-session-unavailable"
@@ -109,6 +119,7 @@ def main():
         for ident in (a, a, b):
             report = saved_run(ident)
             assert ident.encode() in report and b"rollout-tail" in report
+            assert (b"23% used" in report) == (ident == a)
         assert b"thread-excluded-by-metadata" in saved_run(rejected[0])
         with sqlite3.connect(database) as db:
             db.execute("UPDATE threads SET rollout_path=? WHERE id=?",
