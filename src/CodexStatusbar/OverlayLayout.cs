@@ -432,7 +432,9 @@ internal static class OverlayLayoutCalculator
         var panelLeft = capsuleScreen.Right - panelWidth;
         var panelGap = ScaleOverlayDip(CapsulePanelGapDip, dpi, scalePercent);
         var availableBelow = workingArea.Bottom - capsuleScreen.Bottom - panelGap;
-        if (TryGetPanelSize(
+        var availableAbove = capsuleScreen.Top - panelGap - workingArea.Top;
+        if (ChooseDirection(request, capsuleScreen, workingArea, dpi, scalePercent) == ExpansionDirection.Down
+            && TryGetPanelSize(
             request,
             dpi,
             scalePercent,
@@ -461,16 +463,15 @@ internal static class OverlayLayoutCalculator
                 scalePercent);
         }
 
-        var availableAbove = capsuleScreen.Top - panelGap - workingArea.Top;
         if (TryGetPanelSize(
             request,
             dpi,
             scalePercent,
             availableAbove,
-            out panelHeight,
-            out rowHeight))
+            out var upperPanelHeight,
+            out var upperRowHeight))
         {
-            var panelTop = capsuleScreen.Top - panelGap - panelHeight;
+            var panelTop = capsuleScreen.Top - panelGap - upperPanelHeight;
             return new OverlayLayoutResult(
                 OverlayVisualState.Expanded,
                 collapsed.CollapsedDisplay,
@@ -483,11 +484,11 @@ internal static class OverlayLayoutCalculator
                     capsuleScreen.Bottom - panelTop),
                 new IntRect(
                     capsuleScreen.Left - panelLeft,
-                    panelHeight + panelGap,
+                    upperPanelHeight + panelGap,
                     capsuleScreen.Width,
                     capsuleScreen.Height),
-                new IntRect(0, 0, panelWidth, panelHeight),
-                rowHeight,
+                new IntRect(0, 0, panelWidth, upperPanelHeight),
+                upperRowHeight,
                 scalePercent);
         }
 
@@ -871,17 +872,23 @@ internal static class OverlayLayoutCalculator
             return false;
         }
 
-        rowHeight = (availableHeight - chromeHeight) / rowCount;
-        if (rowHeight < minimumRowHeight)
+        var rowSpace = availableHeight - chromeHeight;
+        if (rowSpace < minimumRowHeight)
         {
             rowHeight = 0;
             panelHeight = 0;
             return false;
         }
+        rowHeight = Math.Max(minimumRowHeight, rowSpace / rowCount);
+        panelHeight = chromeHeight + Math.Min(rowCount, rowSpace / rowHeight) * rowHeight;
+        return true;
+    }
 
-        rowHeight = Math.Min(rowHeight, normalRowHeight);
-        panelHeight = chromeHeight + (rowCount * rowHeight);
-        return panelHeight <= availableHeight;
+    internal static int VisibleDetailRows(OverlayLayoutResult layout, int rowCount)
+    {
+        if (layout.ExpandedRowHeight <= 0) return 0;
+        var chrome = ScaleOverlayDip(PanelChromeHeightDip, layout.Dpi, layout.ScalePercent);
+        return Math.Clamp((layout.PanelBounds.Height - chrome) / layout.ExpandedRowHeight, 0, rowCount);
     }
 
     private static ExpansionDirection ChooseDirection(

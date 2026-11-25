@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
@@ -306,6 +307,129 @@ internal static class RenderProbe
             Console.WriteLine($"{dpi} DPI: {form.CurrentCapsuleVariantText}");
         }
     }
+
+    internal static void VerifySavedChatDetails(string directory, OverlaySettings settings, ChatBinding binding,
+        TokenSnapshot snapshot, TokenLogMonitor monitor)
+    {
+        Directory.CreateDirectory(directory);
+        using var form = new TokenStripForm();
+        var interaction = new OverlayInteractionState();
+        form.SetTransparentBackground(true);
+        form.ApplyTheme(OverlayThemePalette.For(OverlayThemeKind.Dark));
+        uint dpi = 96;
+        var area = new IntRect(0, 0, 1000, 800);
+        void Apply(TokenSnapshot current)
+        {
+            var presentation = OverlayPresentationBuilder.Create(current, settings.CollapsedPrimaryField,
+                settings.CollapsedSecondaryField, DisplayFieldRules.SupportedMask);
+            form.SetPresentation(OverlayPresentationBuilder.WithChat(presentation, binding, current));
+            form.ApplyLayout(CalculateLayout(form, dpi, area, interaction.State == OverlayVisualState.Expanded));
+            form.RefreshSurface();
+        }
+        var currentSnapshot = snapshot;
+        form.CapsuleClicked += (_, _) =>
+        {
+            interaction.OnCapsuleMouseUp();
+            Apply(currentSnapshot);
+        };
+        Apply(snapshot);
+        using var background = new Form
+        {
+            StartPosition = FormStartPosition.Manual, FormBorderStyle = FormBorderStyle.None,
+            Bounds = new Rectangle(10, 10, 750, 740), BackColor = Color.FromArgb(32, 34, 40),
+            ShowInTaskbar = false
+        };
+        background.Show();
+        form.Show();
+        form.TopMost = true;
+        form.RefreshSurface();
+        Application.DoEvents();
+
+        SetWindowPos(form.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13);
+        Thread.Sleep(250);
+        Application.DoEvents();
+
+        void Click(IntRect bounds)
+        {
+            var client = new Point(bounds.X + bounds.Width / 2, bounds.Y + bounds.Height / 2);
+            var screen = form.PointToScreen(client);
+            if (WindowFromPoint(screen) != form.Handle)
+                throw new InvalidOperationException($"The overlay did not receive the hit at {screen}.");
+            var position = (IntPtr)(client.X | (client.Y << 16));
+            SendMessage(form.Handle, 0x0201, (IntPtr)1, position);
+            SendMessage(form.Handle, 0x0202, IntPtr.Zero, position);
+            Application.DoEvents();
+        }
+        void AssertExpanded()
+        {
+            if (!form.Visible || form.CurrentLayout?.State != OverlayVisualState.Expanded)
+                throw new InvalidOperationException("Details closed unexpectedly.");
+        }
+        void Capture(string name)
+        {
+            using var image = new Bitmap(form.Width, form.Height);
+            using var graphics = Graphics.FromImage(image);
+            graphics.CopyFromScreen(form.Location, Point.Empty, form.Size);
+            image.Save(Path.Combine(directory, name + ".png"), ImageFormat.Png);
+        }
+
+        for (var cycle = 0; cycle < 3; cycle++)
+        {
+            Click(form.CurrentLayout!.CapsuleBounds);
+            AssertExpanded();
+            Click(form.CurrentLayout!.PanelBounds);
+            AssertExpanded();
+            Click(form.CurrentLayout!.CapsuleBounds);
+            if (form.CurrentLayout?.State != OverlayVisualState.Collapsed)
+                throw new InvalidOperationException("The second click did not close details.");
+        }
+        Click(form.CurrentLayout!.CapsuleBounds);
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var changed = false;
+        var initialText = form.CurrentCapsuleVariantText;
+        while (elapsed.Elapsed < TimeSpan.FromSeconds(31))
+        {
+            Application.DoEvents();
+            var latest = monitor.Poll() ?? snapshot;
+            // Exercise a changed display sample on an idle chat without writing to its rollout.
+            currentSnapshot = elapsed.Elapsed >= TimeSpan.FromSeconds(10)
+                ? latest with { Tps = (latest.Tps ?? 0) + 10 } : latest;
+            Apply(currentSnapshot);
+            AssertExpanded();
+            changed |= initialText != form.CurrentCapsuleVariantText;
+            Thread.Sleep(350);
+        }
+        if (!changed) throw new InvalidOperationException("No display update was exercised.");
+        currentSnapshot = monitor.Poll() ?? snapshot;
+        Apply(currentSnapshot);
+        Capture("details-96dpi");
+        dpi = 144;
+        area = new IntRect(0, 0, 800, 610);
+        form.SetCapsuleVariant(2);
+        Apply(currentSnapshot);
+        AssertExpanded();
+        var before = form.CurrentLayout!;
+        if (OverlayLayoutCalculator.VisibleDetailRows(before, form.CurrentPresentation.ExpandedRows.Count)
+            >= form.CurrentPresentation.ExpandedRows.Count)
+            throw new InvalidOperationException("The short layout did not exercise paging.");
+        Click(before.PanelBounds);
+        AssertExpanded();
+        Capture("details-144dpi-paged");
+        Click(form.CurrentLayout!.CapsuleBounds);
+        if (form.CurrentLayout?.State != OverlayVisualState.Collapsed)
+            throw new InvalidOperationException("The resized panel did not close on click.");
+        File.WriteAllText(Path.Combine(directory, "verification.txt"),
+            $"Saved manual chat, 3 click cycles, open for {elapsed.Elapsed.TotalSeconds:0.0}s, display refresh, 96/144 DPI, paged mouse interaction.");
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(Point point);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int w, int h, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
 
     private static OverlayLayoutResult CalculateLayout(
         TokenStripForm form,

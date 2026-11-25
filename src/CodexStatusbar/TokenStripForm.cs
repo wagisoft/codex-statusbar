@@ -112,18 +112,19 @@ internal readonly record struct OverlayRenderDecorationState(
 internal sealed class TokenStripForm : Form
 {
     private const int WsExToolWindow = 0x00000080;
-    private const int WsExTransparent = 0x00000020;
     private const int WsExLayered = 0x00080000;
     private const int WsExNoActivate = 0x08000000;
     private const int WmMouseActivate = 0x0021;
     private const int WmNcHitTest = 0x0084;
     private const int MaNoActivate = 3;
     private const int HtTransparent = -1;
+    private const int HtClient = 1;
     private const int AcSrcOver = 0x00;
     private const int AcSrcAlpha = 0x01;
     private const int UlwAlpha = 0x02;
 
     private readonly ToolTip _chatTip = new() { ShowAlways = true, AutoPopDelay = 20000 };
+    private int _detailOffset;
     private OverlayPresentation _presentation;
     private OverlayThemePalette _palette = OverlayThemePalette.For(OverlayThemeKind.Dark);
     private OverlayEditGestureKind? _editGesture;
@@ -326,22 +327,6 @@ internal sealed class TokenStripForm : Form
     internal bool IsLayered =>
         IsHandleCreated && (GetWindowLongPtr(Handle, GwlExStyle).ToInt64() & WsExLayered) != 0;
 
-    /// <summary>True while locked: <c>WS_EX_TRANSPARENT</c> plus <c>WS_EX_NOACTIVATE</c>, i.e. the whole
-    /// window — glyph pixels included — is transparent to the mouse and never takes focus.</summary>
-    internal bool IsClickThrough
-    {
-        get
-        {
-            if (!IsHandleCreated)
-            {
-                return false;
-            }
-
-            var exStyle = GetWindowLongPtr(Handle, GwlExStyle).ToInt64();
-            return (exStyle & WsExTransparent) != 0 && (exStyle & WsExNoActivate) != 0;
-        }
-    }
-
     internal OverlayRenderDecorationState RenderDecorations
     {
         get
@@ -423,15 +408,7 @@ internal sealed class TokenStripForm : Form
             {
                 parameters.ExStyle |= WsExNoActivate;
 
-                // Locked means *completely* click-through: every pixel, including the ones the glyphs
-                // occupy, must let Codex have the mouse. Alpha-based hit testing alone would still
-                // swallow clicks that land on a glyph, so the whole window is marked transparent here
-                // and its WM_NCHITTEST answers HTTRANSPARENT unconditionally while locked.
-                //
-                // Both are dropped while adjusting the position — CreateParams is re-evaluated by the
-                // RecreateHandle() in BeginEditMode/EndEditMode, so the switch is atomic with the
-                // handle that carries it.
-                parameters.ExStyle |= WsExTransparent;
+
             }
 
             return parameters;
@@ -462,6 +439,8 @@ internal sealed class TokenStripForm : Form
     public void ApplyLayout(OverlayLayoutResult layout)
     {
         ArgumentNullException.ThrowIfNull(layout);
+        if (CurrentLayout == layout) return;
+        if (layout.State != OverlayVisualState.Expanded) _detailOffset = 0;
         CurrentLayout = layout;
         SetBounds(
             layout.WindowBounds.X,
@@ -721,13 +700,6 @@ internal sealed class TokenStripForm : Form
 
         if (message.Msg == WmNcHitTest)
         {
-            // Locked: transparent everywhere, glyph pixels included, so Codex keeps every click.
-            if (!IsEditMode)
-            {
-                message.Result = (IntPtr)HtTransparent;
-                return;
-            }
-
             if (CurrentLayout is not null)
             {
                 var packed = message.LParam.ToInt64();
@@ -741,6 +713,8 @@ internal sealed class TokenStripForm : Form
                     message.Result = (IntPtr)HtTransparent;
                     return;
                 }
+                message.Result = (IntPtr)HtClient;
+                return;
             }
         }
 
@@ -769,6 +743,23 @@ internal sealed class TokenStripForm : Form
             eventArgs.Button,
             eventArgs.Location,
             PointToScreen(eventArgs.Location));
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs eventArgs)
+    {
+        base.OnMouseWheel(eventArgs);
+        if (CurrentLayout is not { State: OverlayVisualState.Expanded } layout
+            || !layout.PanelBounds.Contains(eventArgs.X, eventArgs.Y))
+            return;
+        ScrollDetails(layout, -Math.Sign(eventArgs.Delta) * 3);
+    }
+
+    private void ScrollDetails(OverlayLayoutResult layout, int rows)
+    {
+        var visible = OverlayLayoutCalculator.VisibleDetailRows(layout, _presentation.ExpandedRows.Count);
+        _detailOffset = Math.Clamp(_detailOffset + rows, 0, _presentation.ExpandedRows.Count - visible);
+        InvalidateSurface();
+        RefreshSurface();
     }
 
     protected override void OnMouseCaptureChanged(EventArgs eventArgs)
@@ -876,6 +867,15 @@ internal sealed class TokenStripForm : Form
                 _fixedTopLeft,
                 _gestureStartScalePercent);
             CompleteEditGesture(completed, releaseCapture: true);
+            return;
+        }
+
+        if (CurrentLayout is { State: OverlayVisualState.Expanded } layout
+            && layout.PanelBounds.Contains(clientPoint.X, clientPoint.Y))
+        {
+            var visible = OverlayLayoutCalculator.VisibleDetailRows(layout, _presentation.ExpandedRows.Count);
+            if (visible > 0 && visible < _presentation.ExpandedRows.Count)
+                ScrollDetails(layout, _detailOffset >= _presentation.ExpandedRows.Count - visible ? -_detailOffset : visible);
             return;
         }
 
@@ -1115,6 +1115,13 @@ internal sealed class TokenStripForm : Form
             graphics.FillPath(backgroundBrush, path);
         }
 
+        else
+        {
+            // Layered Windows surfaces hit-test zero-alpha pixels as transparent.
+            using var inputSurface = new SolidBrush(Color.FromArgb(8, 32, 34, 40));
+            graphics.FillRectangle(inputSurface, bounds);
+        }
+
         // The shadow exists to lift glyphs off an unknown backdrop, so it follows transparency — and the
         // user's switch, because docked in the composer the strip is meant to read as part of Codex.
         var shadow = _transparentBackground && _textShadow;
@@ -1266,7 +1273,8 @@ internal sealed class TokenStripForm : Form
         var headerHeight = metrics.HeaderHeight;
         DrawAlignedText(
             graphics,
-            "Token details",
+            OverlayLayoutCalculator.VisibleDetailRows(layout, _presentation.ExpandedRows.Count) < _presentation.ExpandedRows.Count
+                ? "Token details · click for more" : "Token details",
             headerFont,
             new Rectangle(content.Left, content.Top, content.Width, headerHeight),
             _palette.Value,
@@ -1290,9 +1298,9 @@ internal sealed class TokenStripForm : Form
             labelFont,
             highlightedValueFont);
 
-        var rowsHeight = layout.ExpandedRowHeight > 0
-            ? layout.ExpandedRowHeight * _presentation.ExpandedRows.Count
-            : 0;
+        var visibleRows = OverlayLayoutCalculator.VisibleDetailRows(layout, _presentation.ExpandedRows.Count);
+        var startRow = Math.Clamp(_detailOffset, 0, _presentation.ExpandedRows.Count - visibleRows);
+        var rowsHeight = layout.ExpandedRowHeight * visibleRows;
         var rowsTop = Math.Max(highlightTop + highlightHeight, bounds.Bottom - padding - rowsHeight);
         if (_presentation.ShowContextProgress)
         {
@@ -1317,9 +1325,9 @@ internal sealed class TokenStripForm : Form
             }
         }
 
-        for (var index = 0; index < _presentation.ExpandedRows.Count; index++)
+        for (var index = 0; index < visibleRows; index++)
         {
-            var row = _presentation.ExpandedRows[index];
+            var row = _presentation.ExpandedRows[startRow + index];
             var rowBounds = new Rectangle(
                 content.Left,
                 rowsTop + (index * layout.ExpandedRowHeight),

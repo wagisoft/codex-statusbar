@@ -5,7 +5,7 @@ namespace CodexStatusbar;
 /// <summary>
 /// A single system-wide hotkey (<c>Ctrl+Alt+Shift+P</c>) used to enter and leave position editing.
 ///
-/// <para>Needed because the strip is click-through while locked: there is otherwise no way to start a
+/// <para>Available when the overlay is locked and does not take keyboard focus. It starts a
 /// drag without going to the tray. This uses the documented <c>RegisterHotKey</c> input API on a
 /// private message window — it does not hook, inject into, or modify Codex in any way, and if another
 /// application already owns the same combination registration simply fails and the tray menu still

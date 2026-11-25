@@ -288,9 +288,17 @@ internal sealed record TokenSnapshot(
     /// <summary>Cache-hit rate as a plain number for the layout code (0 when undefined).</summary>
     public double CacheHitPercentValue => CacheHitPercent ?? 0d;
 
-    public double ContextPercent => ContextWindowTokens <= 0
-        ? 0
-        : Math.Clamp(ContextUsedTokens * 100d / ContextWindowTokens, 0, 100);
+    public int ContextPercent => 100 - ContextPercentRemaining(ContextUsedTokens, ContextWindowTokens);
+
+    internal static int ContextPercentRemaining(long used, long window)
+    {
+        const long baseline = 12_000;
+        if (window <= baseline) return 0;
+        var effectiveWindow = window - baseline;
+        var effectiveUsed = Math.Max(used, baseline) - baseline;
+        var percent = Math.Max(0, effectiveWindow - effectiveUsed) / (double)effectiveWindow * 100;
+        return (int)Math.Round(Math.Clamp(percent, 0, 100), MidpointRounding.AwayFromZero);
+    }
 
     public long UncachedInputTokens => Math.Max(0, InputTokens - CachedInputTokens);
 

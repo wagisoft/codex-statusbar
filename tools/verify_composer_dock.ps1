@@ -384,9 +384,7 @@ function Assert-Step([string]$label) {
     $live = New-Object DockNat+RECT
     [void][DockNat]::GetWindowRect($overlayWindow, [ref]$live)
 
-    # Locked means completely click-through: every pixel of the strip's rectangle — the glyphs included —
-    # must let the mouse reach Codex. Sampled rather than asserted, because "alpha-based hit testing
-    # already handles it" is exactly the assumption this check exists to falsify.
+    # The real capsule must receive clicks without covering surrounding Codex controls.
     $samples = 0
     $blocked = 0
     for ($i = 1; $i -le 24; $i++) {
@@ -401,8 +399,8 @@ function Assert-Step([string]$label) {
     $outsidePid = [DockNat]::HitPid(($live.Left + $live.Right) / 2, $live.Top - 4)
     $codexPid = 0
     [void][DockNat]::GetWindowThreadProcessId($hwnd, [ref]$codexPid)
-    Check "$label : locked is completely click-through" ($blocked -eq 0) `
-        "$blocked of $samples sampled points inside the strip resolve to the overlay (must be 0)"
+    Check "$label : capsule receives mouse input" ($blocked -eq $samples) `
+        "$blocked of $samples sampled points inside the strip resolve to the overlay (must be all samples)"
     Check "$label : a point outside the strip reaches Codex untouched" `
         ($outsidePid -eq $codexPid) `
         "WindowFromPoint 4 px above the strip -> pid $outsidePid (Codex $codexPid)"

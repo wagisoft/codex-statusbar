@@ -22,7 +22,7 @@ internal static class ProbeRunner
     {
         LastExitCode = 0;
 
-        if (args.Count == 2 && args[0] == "--capture-saved-chat")
+        if (args.Count == 2 && args[0] is "--capture-saved-chat" or "--verify-saved-chat-details")
         {
             PrepareWindowProbeDpiAwareness();
             var settings = OverlaySettings.Load();
@@ -32,7 +32,10 @@ internal static class ProbeRunner
             var snapshot = monitor.Poll();
             if (binding.Mode != ChatBindingMode.Manual || snapshot is null || !snapshot.HasUsage)
                 throw new InvalidOperationException("Select a local chat with recorded usage before capturing.");
-            RenderProbe.CaptureSavedChat(args[1], settings, binding, snapshot);
+            if (args[0] == "--verify-saved-chat-details")
+                RenderProbe.VerifySavedChatDetails(args[1], settings, binding, snapshot, monitor);
+            else
+                RenderProbe.CaptureSavedChat(args[1], settings, binding, snapshot);
             return true;
         }
 

@@ -200,6 +200,8 @@ internal static class PointerInput
 
     public static bool TryGetCursorPosition(out Point position) => GetCursorPos(out position);
 
+    public static bool IsEscapePressed() => IsPressed(0x1B);
+
     private static bool IsPressed(int virtualKey) => (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
 
     [DllImport("user32.dll")]

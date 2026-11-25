@@ -80,6 +80,24 @@ internal static class SelfTest
             Check("manual selection", monitor.Poll()?.ThreadId, "explicit-thread");
         }
 
+        Section("detail panel survival and CLI context percentage");
+        Check("OilEmpire remaining percentage", TokenSnapshot.ContextPercentRemaining(158276, 475000), 68);
+        Check("context below baseline", TokenSnapshot.ContextPercentRemaining(1, 475000), 100);
+        Check("window at baseline", TokenSnapshot.ContextPercentRemaining(1, 12000), 0);
+        Check("context beyond window", TokenSnapshot.ContextPercentRemaining(900000, 475000), 0);
+        Check("CLI rounds half up", TokenSnapshot.ContextPercentRemaining(12049, 12100), 51);
+        Check("CLI midpoint rounds away from zero", TokenSnapshot.ContextPercentRemaining(12099, 12200), 51);
+        foreach (var dpi in new[] { 96u, 144u, 192u })
+        {
+            var screen = new IntRect(0, 0, 1200, 560);
+            var host = new CodexWindowInfo((IntPtr)1, screen, screen, null, screen, dpi, new WindowChromeMetrics(46, 30, 1, 1, 1));
+            var layout = OverlayLayoutCalculator.Calculate(new OverlayLayoutRequest(host, AnchorMode.InsideBottomRight,
+                true, 16, true, new System.Drawing.Point(500, 490)));
+            Check($"details remain expanded at {dpi} DPI", layout.State, OverlayVisualState.Expanded);
+            var available = OverlayLayoutCalculator.VisibleDetailRows(layout, 16);
+            Check($"details page rows at {dpi} DPI", available is > 0 and < 16, true);
+        }
+
         Section("extended token statistics");
         var stats = new RolloutStreamState();
         void Usage(long total, long input, long output) => stats.ObserveLine(

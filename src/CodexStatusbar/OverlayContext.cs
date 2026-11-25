@@ -28,6 +28,7 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
     private readonly NotifyIcon _trayIcon;
     private readonly System.Windows.Forms.Timer _timer;
     private readonly System.Windows.Forms.Timer _outsideClickTimer;
+    private bool _escapeWasPressed;
     private readonly ToolStripMenuItem _sessionMenuItem;
     private readonly ToolStripMenuItem _visibilityMenuItem;
     private readonly ToolStripMenuItem _automaticChatItem;
@@ -1603,10 +1604,8 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
         if (_interaction.State == OverlayVisualState.Expanded
             && layout.State != OverlayVisualState.Expanded)
         {
-            _interaction.CollapseForExpandedLayoutFailure();
+            // Keep the request across transient positioning samples. A later layout can fit again.
             StopOutsideClickPolling();
-            layout = OverlayLayoutCalculator.Calculate(
-                CreateLayoutRequest(target.HostWindow, manualTopLeft, dock, dockedSize));
         }
 
         if (layout.State == OverlayVisualState.HiddenForSpace)
@@ -1985,7 +1984,7 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
 
     /// <summary>
     /// <c>Ctrl+Alt+Shift+P</c>: enter position editing, or lock the strip back down. Works from any
-    /// application, which matters because the strip is click-through while locked.
+    /// application without changing focus.
     /// </summary>
     private void ToggleManualEditing()
     {
@@ -2377,16 +2376,9 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
         ToggleDetailPanel();
     }
 
-    /// <summary>
-    /// Opens or closes the detail panel.
-    ///
-    /// <para>While locked the strip is completely click-through — glyph pixels included — so the panel
-    /// can no longer be opened by clicking the numbers. This is the same toggle the click used to
-    /// call, reached from the tray instead; the panel itself is unchanged.</para>
-    /// </summary>
     private void ToggleDetailPanel()
     {
-        if (!_interaction.OnCapsuleMouseUp() || _currentTarget is null)
+        if (_currentTarget is null || !_interaction.OnCapsuleMouseUp())
         {
             return;
         }
@@ -2411,9 +2403,11 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
             return;
         }
 
-        if (_interaction.OnPointerSample(
-            PointerInput.ReadPressedButtons(),
-            _form.ContainsScreenPoint(position)))
+        var escapePressed = PointerInput.IsEscapePressed();
+        var escapeEdge = escapePressed && !_escapeWasPressed;
+        _escapeWasPressed = escapePressed;
+        if ((escapeEdge && _interaction.CollapseForHostChange())
+            || _interaction.OnPointerSample(PointerInput.ReadPressedButtons(), _form.ContainsScreenPoint(position)))
         {
             StopOutsideClickPolling();
             if (_currentTarget is not null)
@@ -2425,8 +2419,10 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
 
     private void UpdateOutsideClickPolling()
     {
-        if (_interaction.ShouldPollOutsideClicks && !_manuallyHidden)
+        if (_interaction.ShouldPollOutsideClicks && !_manuallyHidden
+            && _form.CurrentLayout?.State == OverlayVisualState.Expanded)
         {
+            if (!_outsideClickTimer.Enabled) _escapeWasPressed = PointerInput.IsEscapePressed();
             _outsideClickTimer.Start();
         }
         else
