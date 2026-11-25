@@ -308,11 +308,18 @@ Codex Desktop; it will attach as soon as a Codex window is in the foreground.
 
 ### Start with Windows
 
-**On by default.** The first launch of a build that has this feature registers
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `CodexStatusbar` =
-`"<full path>\CodexStatusbar.exe" --background`. No administrator rights are involved at any point.
-The tray's **Start with Windows** item toggles it later, and turning it off is permanent: no upgrade
-re-enables it behind your back. §10 has the details.
+**Off by default.** Enable it explicitly from the tray if desired.
+
+### Choose a chat
+
+Start without arguments and open **Choose chat…** from the tray. Search by title, project or
+folder. The dialog groups chats by project, shows last activity and prioritizes recently selected
+chats. Enable **Show archived chats** to include archived entries. The chosen chat is saved
+locally. **Follow active chat automatically** switches back to verified desktop routes, and
+**Use saved manual chat** restores your previous selection. The tray shows the mode and selected
+chat. The manual overlay marker signals that its numbers may refer to a different chat than the
+open Codex window. A missing rollout shows placeholders. See the
+[Phase 2 acceptance guide](docs/PHASE2-ACCEPTANCE.md).
 
 ---
 
@@ -633,7 +640,7 @@ every transition, so a launch can be read back in order:
 
 ```
 [22:36:55] watcher started · mode background · primary instance
-[22:36:55] startup registration: enabled (first run; on by default, the tray can turn it off)
+[22:36:55] startup registration: disabled
 [22:38:03] waiting: no Codex detected
 [22:38:47] Codex process detected PID=55088 package=OpenAI.Codex version=26.928.3736.0
 [22:38:47] attaching: Codex process detected PID=55088 package=OpenAI.Codex version=26.928.3736.0 window=yes
@@ -759,7 +766,7 @@ regenerates it from *your* Codex build (see §9).
    event name was absent from its app.asar. The monitor checks the foreground Chromium document
    for an exact app://-/local/UUID route (including hash-router forms). If the renderer omits its URL,
    the document cannot identify the chat. App-server lists stored or loaded threads and provides no documented mapping
-   to the displayed window. Use `--thread ID` when no unique desktop route is available.
+   to the displayed window. Use **Choose chat…** or `--thread ID` when no unique desktop route is available.
 3. **Concurrent windows.** With no exact foreground document URL, IPC requires one reported route and one foreground
    Desktop chat window. An unconfirmed window reports `unverified-foreground-window`.
 4. **Session verification.** Automatic selection checks the matching unarchived SQLite row for
@@ -961,11 +968,8 @@ Admin:    no — HKCU only, never HKLM, never a service, never a scheduled task
 ```
 
 * The path is always quoted, so an install directory containing spaces cannot be mis-parsed.
-* **On by default, once.** The first launch of a build that has this feature registers it. After
-  that the setting is the user's: unchecking it deletes the value and no later launch or upgrade
-  re-creates it. `settings.json` keeps both `startWithWindows` (the intent) and `startupConfigured`
-  (whether the one-time default has been applied), because "never configured" and "turned off" are
-  otherwise indistinguishable.
+* **Off by default.** The tray and CLI retain an explicit opt-in. Settings store the preference
+  and whether startup has been configured.
 * **The path self-repairs.** If the value points at a directory the exe has since moved out of, the
   next launch rewrites it (§22 in the original spec).
 * The executable is a **GUI-subsystem** binary, so the logon launch shows no console window — only

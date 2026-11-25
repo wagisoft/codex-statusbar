@@ -275,7 +275,7 @@ internal sealed record TokenSnapshot(
     long MergedModelElapsedMs = 0,
     IReadOnlyList<string>? ModelIntervals = null,
     string Carrier = "none",
-    int DedupIgnored = 0)
+    int DedupIgnored = 0, string Project = "")
 {
     public double? CacheHitPercent => MetricFormat.CacheHitPercent(InputTokens, CachedInputTokens);
 
@@ -782,6 +782,104 @@ internal sealed class TokenLogMonitor : IDisposable
     public string MissingRouteReason { get; private set; } = "waiting-for-desktop-route";
 
     private string _routeSource = "ipc";
+    private ChatBinding _chatBinding;
+
+    public void ConfigureBinding(ChatBinding binding)
+    {
+        if (_chatBinding == binding) return;
+        _chatBinding = binding;
+        _manualFailure = null;
+        IsForcedPin = binding.FromCommandLine;
+        PinActiveSession = binding.Mode == ChatBindingMode.Manual;
+        PreferredThreadId = PinActiveSession ? binding.ThreadId : null;
+        _lastCandidate = null;
+        SwitchActiveLog(null, null, "waiting-for-chat");
+    }
+
+    private void SelectManualChat(string? threadId)
+    {
+        if (_readerPath is { } existingPath && !File.Exists(existingPath))
+        {
+            SwitchActiveLog(null, null, "manual-session-unavailable");
+            _lastCandidate = null;
+        }
+        if (threadId is null || !IsPlausibleThreadId(threadId))
+        {
+            _manualFailure = "invalid-manual-thread-id";
+            if (_selectionSource != "manual-session-unavailable")
+                SwitchActiveLog(null, null, "manual-session-unavailable");
+            return;
+        }
+        if (_selectedThreadId is not null) return;
+        if (_lastCandidate == threadId && DateTime.UtcNow < _retryAfter) return;
+        _lastCandidate = threadId;
+        _retryAfter = DateTime.UtcNow.AddSeconds(2);
+        var record = StateDatabase.TryReadSelectableThread(_stateDatabasePath, threadId);
+        var reason = ResolveIndexedRollout(record, threadId, true, out var path);
+        if (reason is null)
+        {
+            _manualFailure = null;
+            SwitchActiveLog(path, threadId, "manual", record);
+        }
+        else
+        {
+            _manualFailure = reason;
+            if (_selectionSource != "manual-session-unavailable")
+                SwitchActiveLog(null, null, "manual-session-unavailable");
+        }
+    }
+
+    private string? _manualFailure;
+
+    private string? ResolveIndexedRollout(StateThreadRecord? record, string id, bool allowArchive, out string? path)
+    {
+        path = null;
+        if (record is null)
+        {
+            if (!File.Exists(_stateDatabasePath)) return "session-index-missing-or-inaccessible";
+            return StateDatabase.TryReadThread(_stateDatabasePath, id) is null
+                ? "thread-missing-or-index-unreadable" : "thread-excluded-by-metadata";
+        }
+        if (string.IsNullOrWhiteSpace(record.RolloutPath)) return "missing-indexed-rollout-path";
+        try
+        {
+            path = NormalizeSessionPath(record.RolloutPath);
+            var sessions = NormalizeSessionPath(_sessionRoot);
+            if (path is null || sessions is null) return "invalid-rollout-path";
+            var home = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(sessions));
+            if (!IsBelow(path, sessions) && !(allowArchive && home is not null
+                && IsBelow(path, Path.Combine(home, "archived_sessions"))))
+                return "rollout-outside-session-root";
+            if (!string.Equals(ExtractThreadId(path), id, StringComparison.OrdinalIgnoreCase)
+                || !path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase))
+                return "rollout-filename-id-mismatch";
+            return File.Exists(path) ? null : "rollout-missing-or-inaccessible";
+        }
+        catch (Exception error) when (error is ArgumentException or IOException or NotSupportedException)
+        {
+            return "invalid-rollout-path";
+        }
+    }
+
+    private static bool IsBelow(string path, string root) =>
+        path.StartsWith(Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase);
+
+    private static string? NormalizeSessionPath(string path)
+    {
+        // The Windows index can store the extended spelling of a DOS drive or UNC path.
+        if (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+            path = @"\\" + path[8..];
+        else if (path.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            path = path[4..];
+            if (path.Length < 3 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path[2] != '\\')
+                return null;
+        }
+        if (!Path.IsPathFullyQualified(path) || path.StartsWith(@"\\.\", StringComparison.Ordinal))
+            return null;
+        return Path.GetFullPath(path);
+    }
 
     public void ObserveDesktopRoute(ActiveThreadRouteStatus route)
     {
@@ -805,7 +903,15 @@ internal sealed class TokenLogMonitor : IDisposable
         var preferred = PreferredThreadId;
         var hasPreferred = !string.IsNullOrWhiteSpace(preferred);
 
-        if (IsForcedPin && hasPreferred && _selectedThreadId is null)
+        if (_chatBinding.Mode == ChatBindingMode.Manual && !_chatBinding.FromCommandLine)
+        {
+            SelectManualChat(preferred);
+        }
+        else if (IsForcedPin && hasPreferred && _readerPath is { } pinnedPath && !File.Exists(pinnedPath))
+        {
+            SwitchActiveLog(null, null, "manual-session-unavailable");
+        }
+        else if (IsForcedPin && hasPreferred && _selectedThreadId is null)
         {
             // --thread: pin immediately instead of waiting for a state-database round trip. Without
             // this the first poll would select an unrelated conversation from the database and the
@@ -900,6 +1006,11 @@ internal sealed class TokenLogMonitor : IDisposable
         {
             _reader = null;
             _readerPath = null;
+            if (_chatBinding.Mode == ChatBindingMode.Manual && !IsForcedPin)
+            {
+                _manualFailure = exception is UnauthorizedAccessException ? "rollout-access-denied" : "rollout-read-error";
+                SwitchActiveLog(null, null, "manual-session-unavailable");
+            }
         }
     }
 
@@ -934,7 +1045,10 @@ internal sealed class TokenLogMonitor : IDisposable
 
         if (IsForcedPin)
         {
-            SwitchActiveLog(FindRolloutPath(threadId, requireDesktopRoot: false), threadId, source);
+            var indexed = StateDatabase.TryReadSelectableThread(_stateDatabasePath, threadId);
+            var pinnedPath = ResolveIndexedRollout(indexed, threadId, true, out var candidate) is null
+                ? candidate : FindRolloutPath(threadId, requireDesktopRoot: false);
+            SwitchActiveLog(pinnedPath, threadId, source, pinnedPath is not null && pinnedPath == candidate ? indexed : null);
             return;
         }
 
@@ -945,11 +1059,8 @@ internal sealed class TokenLogMonitor : IDisposable
         _lastCandidate = threadId;
         _retryAfter = DateTime.UtcNow.AddSeconds(2);
         var record = StateDatabase.TryReadDesktopUserThread(_stateDatabasePath, threadId);
-        var path = record?.RolloutPath;
-        if (path is null || !Path.IsPathFullyQualified(path)
-            || !Path.GetFullPath(path).StartsWith(Path.TrimEndingDirectorySeparator(Path.GetFullPath(_sessionRoot))
-                + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-            || !IsRootDesktopSession(path, threadId))
+        if (ResolveIndexedRollout(record, threadId, false, out var path) is not null
+            || path is null || !IsRootDesktopSession(path, threadId))
         {
             SwitchActiveLog(null, null, "unverified-desktop-session");
             return;
@@ -985,7 +1096,7 @@ internal sealed class TokenLogMonitor : IDisposable
         }
     }
 
-    private static bool IsPlausibleThreadId(string threadId) =>
+    internal static bool IsPlausibleThreadId(string threadId) =>
         threadId.Length is >= 8 and <= 64
         && threadId.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
@@ -1049,7 +1160,7 @@ internal sealed class TokenLogMonitor : IDisposable
     {
         _selectedThreadId = threadId;
         _selectionSource = source;
-        _stateRecord = record ?? TryReadStateRecord(threadId);
+        _stateRecord = record ?? (IsForcedPin && path is null ? null : TryReadStateRecord(threadId));
         _reader = null;
         _readerPath = null;
         _baselineSource = "none";
@@ -1096,7 +1207,7 @@ internal sealed class TokenLogMonitor : IDisposable
         var input = state?.InputTokens ?? 0;
         var cached = state?.CachedInputTokens ?? 0;
         var output = state?.OutputTokens ?? 0;
-        if (state is null && _stateRecord is not null)
+        if (state is null && _stateRecord is not null && _chatBinding.Mode != ChatBindingMode.Manual)
         {
             // No rollout file yet (or unreadable): state_5.sqlite's official thread total is the only
             // number available, and it is a cumulative (input + output) total.
@@ -1106,7 +1217,8 @@ internal sealed class TokenLogMonitor : IDisposable
 
         var tps = tracker?.DisplayTps;
         var lastTurnTps = tracker?.LastTurnTps;
-        var warnings = state is null ? null : state.Warnings.ToArray();
+        var warnings = _selectionSource == "manual-session-unavailable" && _manualFailure is not null
+            ? new[] { _manualFailure } : state?.Warnings.ToArray();
         var path = _readerPath ?? string.Empty;
 
         // The unioned model-output windows, rendered as "[start,end] [start,end]".
@@ -1195,7 +1307,7 @@ internal sealed class TokenLogMonitor : IDisposable
             tracker?.MergedModelElapsedMs ?? 0,
             intervals,
             state?.Carrier ?? "none",
-            dedupIgnored);
+            dedupIgnored, _stateRecord?.Project ?? string.Empty);
         return _lastSnapshot;
     }
 
@@ -1234,17 +1346,12 @@ internal static class HeadlessRunner
     public static int Run(CommandLineOptions options)
     {
         using var routeMonitor = new CodexIpcActiveThreadMonitor();
-        if (string.IsNullOrWhiteSpace(options.ForcedThreadId))
+        var binding = ChatBinding.Resolve(OverlaySettings.Load(options.SettingsPath), options.ForcedThreadId);
+        if (binding.Mode == ChatBindingMode.Automatic)
             routeMonitor.Start();
         using var monitor = new TokenLogMonitor(options.SessionRoot);
+        monitor.ConfigureBinding(binding);
         var diagnostics = new DebugDiagnostics(options.Debug);
-
-        if (!string.IsNullOrWhiteSpace(options.ForcedThreadId))
-        {
-            monitor.PinActiveSession = true;
-            monitor.IsForcedPin = true;
-            monitor.PreferredThreadId = options.ForcedThreadId;
-        }
 
         var deadline = options.DurationSeconds is int seconds
             ? DateTime.UtcNow.AddSeconds(seconds)
@@ -1284,7 +1391,7 @@ internal static class HeadlessRunner
         CommandLineOptions options,
         TokenSnapshot? previous)
     {
-        if (string.IsNullOrWhiteSpace(options.ForcedThreadId))
+        if (!monitor.PinActiveSession)
         {
             var route = routeMonitor.GetStatus();
             monitor.ObserveDesktopRoute(route);

@@ -7,7 +7,7 @@ internal sealed record StateThreadRecord(
     string Id,
     string? Title,
     string? RolloutPath,
-    long TokensUsed);
+    long TokensUsed, string Project);
 
 /// <summary>
 /// Read-only access to <c>state_5.sqlite</c> through the SQLite library that ships with Windows
@@ -21,7 +21,9 @@ internal static class StateDatabase
     private const int SqliteDone = 101;
     private const int SqliteOpenReadOnly = 0x00000001;
 
-    private const string ThreadColumns = "id, title, rollout_path, tokens_used";
+    private static string DisplayTitle(string databasePath) =>
+        Query(databasePath, "SELECT 1 FROM pragma_table_info('threads') WHERE name='name'", null, _ => true).Count > 0
+            ? "COALESCE(NULLIF(TRIM(name), ''), title)" : "title";
 
     public static string ResolvePath()
     {
@@ -66,24 +68,48 @@ internal static class StateDatabase
 
         return QuerySingle(
             databasePath,
-            $"SELECT {ThreadColumns} FROM threads WHERE id = $id LIMIT 1",
+            $"SELECT id, {DisplayTitle(databasePath)}, rollout_path, tokens_used, cwd, git_origin_url FROM threads WHERE id = $id LIMIT 1",
             threadId);
     }
 
     // Unknown schemas fail closed. Only an independently observed route supplies the ID.
     public static StateThreadRecord? TryReadDesktopUserThread(string databasePath, string threadId) =>
         QuerySingle(databasePath,
-            $"SELECT {ThreadColumns} FROM threads WHERE id = $id AND archived = 0 " +
+            $"SELECT id, {DisplayTitle(databasePath)}, rollout_path, tokens_used, cwd, git_origin_url FROM threads WHERE id = $id AND archived = 0 " +
             "AND source = 'vscode' AND (thread_source IS NULL OR thread_source = 'user') " +
             "AND (originator IS NULL OR originator = 'Codex Desktop') " +
             "AND agent_role IS NULL AND agent_path IS NULL AND agent_nickname IS NULL " +
             "AND attached_thread_parent_id IS NULL LIMIT 1", threadId);
 
-    private static StateThreadRecord? QuerySingle(string databasePath, string sql, string? parameter)
+    private const string UserChat = "source = 'vscode' AND "
+        + "(thread_source IS NULL OR thread_source IN ('user', 'chatgpt_handoff')) "
+        + "AND agent_role IS NULL AND agent_path IS NULL AND agent_nickname IS NULL "
+        + "AND attached_thread_parent_id IS NULL";
+
+    public static IReadOnlyList<ChatEntry> ReadChatCatalog(string databasePath) =>
+        Query(databasePath, $"SELECT id, {DisplayTitle(databasePath)}, cwd, git_origin_url, " +
+            "COALESCE(updated_at_ms, updated_at * 1000, 0), archived FROM threads WHERE " +
+            UserChat + " ORDER BY COALESCE(updated_at_ms, updated_at * 1000, 0) DESC, id", null,
+            statement => new ChatEntry(
+                ReadText(statement, 0) ?? string.Empty,
+                ReadText(statement, 1) is { Length: > 0 } title ? title : "Untitled chat",
+                ReadText(statement, 2), ReadText(statement, 3),
+                sqlite3_column_int64(statement, 4), sqlite3_column_int64(statement, 5) != 0));
+
+    public static StateThreadRecord? TryReadSelectableThread(string databasePath, string id) =>
+        QuerySingle(databasePath, $"SELECT id, {DisplayTitle(databasePath)}, rollout_path, tokens_used, cwd, git_origin_url FROM threads WHERE id = $id AND {UserChat} LIMIT 1", id);
+
+    private static StateThreadRecord? QuerySingle(string databasePath, string sql, string? parameter) =>
+        Query(databasePath, sql, parameter, statement => new StateThreadRecord(
+            ReadText(statement, 0) ?? string.Empty, ReadText(statement, 1), ReadText(statement, 2),
+            sqlite3_column_int64(statement, 3), new ChatEntry(string.Empty, string.Empty,
+                ReadText(statement, 4), ReadText(statement, 5), 0, false).Project)).FirstOrDefault();
+
+    private static IReadOnlyList<T> Query<T>(string databasePath, string sql, string? parameter, Func<IntPtr, T> readRow)
     {
         if (!File.Exists(databasePath))
         {
-            return null;
+            return [];
         }
 
         IntPtr database = IntPtr.Zero;
@@ -96,13 +122,13 @@ internal static class StateDatabase
             databasePathPointer = Marshal.StringToCoTaskMemUTF8(databasePath);
             if (sqlite3_open_v2(databasePathPointer, out database, SqliteOpenReadOnly, IntPtr.Zero) != SqliteOk)
             {
-                return null;
+                return [];
             }
 
             sqlPointer = Marshal.StringToCoTaskMemUTF8(sql);
             if (sqlite3_prepare_v2(database, sqlPointer, -1, out statement, IntPtr.Zero) != SqliteOk)
             {
-                return null;
+                return [];
             }
 
             if (parameter is not null)
@@ -110,20 +136,15 @@ internal static class StateDatabase
                 parameterPointer = Marshal.StringToCoTaskMemUTF8(parameter);
                 if (sqlite3_bind_text(statement, 1, parameterPointer, -1, IntPtr.Zero) != SqliteOk)
                 {
-                    return null;
+                    return [];
                 }
             }
 
-            if (sqlite3_step(statement) != SqliteRow)
-            {
-                return null;
-            }
-
-            return new StateThreadRecord(
-                ReadText(statement, 0) ?? string.Empty,
-                ReadText(statement, 1),
-                ReadText(statement, 2),
-                sqlite3_column_int64(statement, 3));
+            var results = new List<T>();
+            int status;
+            while ((status = sqlite3_step(statement)) == SqliteRow)
+                results.Add(readRow(statement));
+            return status == SqliteDone ? results : [];
         }
         catch (Exception exception) when (exception is DllNotFoundException
             or EntryPointNotFoundException
@@ -131,7 +152,7 @@ internal static class StateDatabase
             or AccessViolationException)
         {
             // No usable SQLite on this machine: the overlay simply runs without the state-db fallback.
-            return null;
+            return [];
         }
         finally
         {

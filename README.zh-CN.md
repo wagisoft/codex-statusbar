@@ -285,10 +285,14 @@ pwsh -File build.ps1 -SkipTest    # build + publish only
 
 ### 开机自动启动
 
-**默认开启。** 带此功能的构建在第一次启动时会登记
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `CodexStatusbar` =
-`"<full path>\CodexStatusbar.exe" --background`。整个过程都不涉及管理员权限。托盘的
-**开机自动启动** 项之后可以切换它，而且关掉就是永久的：没有升级会在你背后重新打开它。细节见 §10。
+**默认关闭。** 如需开机自动启动，可在托盘菜单中显式开启。
+
+### 手动选择会话
+
+启动时无需参数。在托盘菜单中打开 **Choose chat…**，按标题、项目或工作目录搜索。
+对话框按项目分组，显示最近活动，并优先列出最近选择的会话。归档会话默认隐藏。
+选择会话后会立即切换并保存设置。用 **Follow active chat automatically** 返回自动识别，
+或用 **Use saved manual chat** 恢复已保存的选择。手动选择不会改变 Codex 当前打开的会话。
 
 ---
 
@@ -589,7 +593,7 @@ Clamped:             no
 
 ```
 [22:36:55] watcher started · mode background · primary instance
-[22:36:55] startup registration: enabled (first run; on by default, the tray can turn it off)
+[22:36:55] startup registration: disabled
 [22:38:03] waiting: no Codex detected
 [22:38:47] Codex process detected PID=55088 package=OpenAI.Codex version=26.928.3736.0
 [22:38:47] attaching: Codex process detected PID=55088 package=OpenAI.Codex version=26.928.3736.0 window=yes
@@ -883,10 +887,7 @@ Admin:    no — HKCU only, never HKLM, never a service, never a scheduled task
 ```
 
 * 路径始终带引号，因此包含空格的安装目录不会被解析错。
-* **默认开启，且只开一次。** 带此功能的构建在第一次启动时登记它。此后这一设置属于用户：取消勾选
-  会删除该值，之后任何启动或升级都不会重新创建它。`settings.json` 同时保留 `startWithWindows`
-  （意图）与 `startupConfigured`（那次一次性默认是否已经应用过），因为"从未配置"和"已被关掉"
-  否则无法区分。
+* **默认关闭。** 用户可以在托盘菜单中或用命令行显式开启。设置中保留用户的选择。
 * **路径会自我修复。** 如果该值指向的目录 exe 已经不在其中，下一次启动会重写它（原始规格中的
   §22）。
 * 可执行文件是 **GUI 子系统**二进制，因此登录时启动不会出现控制台窗口 —— 只有托盘图标，以及

@@ -22,9 +22,42 @@ internal static class ProbeRunner
     {
         LastExitCode = 0;
 
+        if (args.Count == 2 && args[0] == "--capture-saved-chat")
+        {
+            PrepareWindowProbeDpiAwareness();
+            var settings = OverlaySettings.Load();
+            var binding = ChatBinding.Resolve(settings, null);
+            using var monitor = new TokenLogMonitor(sessionRoot);
+            monitor.ConfigureBinding(binding);
+            var snapshot = monitor.Poll();
+            if (binding.Mode != ChatBindingMode.Manual || snapshot is null || !snapshot.HasUsage)
+                throw new InvalidOperationException("Select a local chat with recorded usage before capturing.");
+            RenderProbe.CaptureSavedChat(args[1], settings, binding, snapshot);
+            return true;
+        }
+
         if (args.Count >= 1 && args[0].Equals("--self-test", StringComparison.OrdinalIgnoreCase))
         {
             LastExitCode = SelfTest.Run(args.Count >= 2 ? args[1] : null);
+            return true;
+        }
+
+        if (args.Count >= 5 && args[0].Equals("--chat-selection-probe", StringComparison.OrdinalIgnoreCase))
+        {
+            using var monitor = new TokenLogMonitor(sessionRoot);
+            TokenSnapshot? Select(string id)
+            {
+                monitor.ConfigureBinding(new(ChatBindingMode.Manual, id, false));
+                return monitor.Poll();
+            }
+
+            WriteJson(args[1], new
+            {
+                Catalog = StateDatabase.ReadChatCatalog(StateDatabase.ResolvePathForSessionsRoot(sessionRoot)),
+                First = Select(args[2]),
+                Second = Select(args[3]),
+                Missing = Select(args[4])
+            });
             return true;
         }
 
@@ -261,7 +294,7 @@ internal static class ProbeRunner
     private static T ReadJson<T>(string path)
     {
         return JsonSerializer.Deserialize<T>(File.ReadAllText(path, Encoding.UTF8), JsonOptions)
-            ?? throw new JsonException($"JSON 探针请求为空：{path}");
+            ?? throw new JsonException($"Empty JSON probe request: {path}");
     }
 
     private static object ExecuteLayoutProbe(string path)
@@ -276,7 +309,7 @@ internal static class ProbeRunner
             if (operation?.Equals("ConvertCaptionBounds", StringComparison.OrdinalIgnoreCase) == true)
             {
                 var conversion = item.Deserialize<CaptionBoundsProbeRequest>(JsonOptions)
-                    ?? throw new JsonException("标题按钮坐标转换请求为空。");
+                    ?? throw new JsonException("Empty title-bar button coordinate request.");
                 results.Add(new CaptionBoundsProbeResult(
                     conversion.Name,
                     CodexWindowLocator.ConvertRelativeToScreen(
@@ -286,7 +319,7 @@ internal static class ProbeRunner
             }
 
             var layoutCase = item.Deserialize<LayoutProbeCaseRequest>(JsonOptions)
-                ?? throw new JsonException("布局探针案例为空。");
+                ?? throw new JsonException("Empty layout probe case.");
             var layoutResult = LayoutProbe.Execute(new LayoutProbeRequest { Cases = [layoutCase] });
             results.Add(layoutResult.Cases[0]);
         }
@@ -317,7 +350,7 @@ internal static class ProbeRunner
                     DeserializeAttachmentCase<AttachmentScaleProbeRequest>(item)),
                 "EditState" => ExecuteEditStateProbe(
                     DeserializeAttachmentCase<AttachmentEditStateProbeRequest>(item)),
-                _ => throw new InvalidOperationException($"未知的手动吸附探针操作：{operation}")
+                _ => throw new InvalidOperationException($"Unknown manual snap probe operation: {operation}")
             });
         }
 
@@ -327,7 +360,7 @@ internal static class ProbeRunner
     private static T DeserializeAttachmentCase<T>(JsonElement item)
     {
         return item.Deserialize<T>(JsonOptions)
-            ?? throw new JsonException("手动吸附探针案例为空。");
+            ?? throw new JsonException("Empty manual snap probe case.");
     }
 
     private static object ExecuteReferencePointsProbe(AttachmentReferencePointsProbeRequest request)
@@ -729,7 +762,7 @@ internal static class ProbeRunner
         form.SimulateEditResize(start, current);
         form.EditPreviewChanged -= CapturePreview;
         form.SimulateEditGestureCompleted(current);
-        return preview ?? throw new InvalidOperationException("缩放模拟未产生预览事件。");
+        return preview ?? throw new InvalidOperationException("The resize simulation produced no preview event.");
 
         void CapturePreview(object? sender, OverlayEditPreviewEventArgs eventArgs) => preview = eventArgs;
     }

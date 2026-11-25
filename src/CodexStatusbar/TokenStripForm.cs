@@ -123,6 +123,7 @@ internal sealed class TokenStripForm : Form
     private const int AcSrcAlpha = 0x01;
     private const int UlwAlpha = 0x02;
 
+    private readonly ToolTip _chatTip = new() { ShowAlways = true, AutoPopDelay = 20000 };
     private OverlayPresentation _presentation;
     private OverlayThemePalette _palette = OverlayThemePalette.For(OverlayThemeKind.Dark);
     private OverlayEditGestureKind? _editGesture;
@@ -373,7 +374,7 @@ internal sealed class TokenStripForm : Form
                 true,
                 true,
                 true,
-                "拖动调整位置",
+                "Drag to reposition",
                 new IntRect(
                     content.Left,
                     content.Top,
@@ -441,6 +442,7 @@ internal sealed class TokenStripForm : Form
     {
         ArgumentNullException.ThrowIfNull(presentation);
         _presentation = presentation;
+        _chatTip.SetToolTip(this, presentation.ChatDetails);
         InvalidateSurface();
     }
 
@@ -597,7 +599,7 @@ internal sealed class TokenStripForm : Form
         if (CurrentLayout?.State != OverlayVisualState.Collapsed
             || !CurrentLayout.PanelBounds.IsEmpty)
         {
-            throw new InvalidOperationException("编辑模式只能从收起布局开始。");
+            throw new InvalidOperationException("Collapse the statusbar before editing its position.");
         }
 
         _gestureStartScalePercent = ManualAttachmentRules.SanitizeScale(scalePercent);
@@ -1134,20 +1136,6 @@ internal sealed class TokenStripForm : Form
 
         var padding = metrics.HorizontalPadding;
         var content = Rectangle.Inflate(bounds, -padding, 0);
-        if (!string.IsNullOrWhiteSpace(_presentation.StatusText))
-        {
-            DrawAlignedText(
-                graphics,
-                _presentation.StatusText,
-                labelFont,
-                content,
-                _palette.Label,
-                TextAlignment.Center,
-                shadow);
-            DrawEditHandle(graphics, editPen, metrics, decorations);
-            return;
-        }
-
         // The collapsed strip is one pre-composed line:
         //     ⚡ 243 tok/s · 5.7M tok · Cache 98%
         // All three primary metrics are visible without any click. It is drawn as a single string at
@@ -1278,7 +1266,7 @@ internal sealed class TokenStripForm : Form
         var headerHeight = metrics.HeaderHeight;
         DrawAlignedText(
             graphics,
-            "Token 详情",
+            "Token details",
             headerFont,
             new Rectangle(content.Left, content.Top, content.Width, headerHeight),
             _palette.Value,
@@ -1508,7 +1496,7 @@ internal sealed class TokenStripForm : Form
         }
 
         using var format = CreateFormat(TextAlignment.Near);
-        var iconAdvance = graphics.MeasureString(icon, iconFont, new SizeF(512f, 512f), format).Width;
+        var iconAdvance = IconAdvance(graphics, icon, iconFont, format);
         var spaceAdvance = MeasureSpaceAdvance(graphics, textFont);
         var bodyAdvance = graphics.MeasureString(body, textFont, new SizeF(8192f, 512f), format).Width;
         var total = iconAdvance + spaceAdvance + bodyAdvance;
@@ -1519,19 +1507,35 @@ internal sealed class TokenStripForm : Form
             - DescentPixels(textFont, graphics) + DescentPixels(iconFont, graphics)) / 2d;
 
         var iconWidth = (int)Math.Ceiling(iconAdvance);
-        DrawAlignedText(
-            graphics,
-            icon,
-            iconFont,
-            new Rectangle(
-                left,
-                bounds.Top + (int)Math.Round(baselineShift, MidpointRounding.AwayFromZero),
-                iconWidth,
-                bounds.Height),
-            color,
-            TextAlignment.Near,
-            shadow,
-            metrics);
+        if (icon == "📌")
+        {
+            var saved = graphics.Save();
+            graphics.TranslateTransform(left + iconWidth / 2f, bounds.Top + bounds.Height / 2f);
+            graphics.ScaleTransform(iconWidth / 12f, iconWidth / 12f);
+            graphics.RotateTransform(32);
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using var ink = new SolidBrush(color);
+            graphics.FillPolygon(ink, new PointF[] { new(-3, -5), new(3, -5), new(2, -4),
+                new(2, -1), new(4, 1), new(4, 2), new(.6f, 2), new(0, 6),
+                new(-.6f, 2), new(-4, 2), new(-4, 1), new(-2, -1), new(-2, -4) });
+            graphics.Restore(saved);
+        }
+        else
+        {
+            DrawAlignedText(
+                graphics,
+                icon,
+                iconFont,
+                new Rectangle(
+                    left,
+                    bounds.Top + (int)Math.Round(baselineShift, MidpointRounding.AwayFromZero),
+                    iconWidth,
+                    bounds.Height),
+                color,
+                TextAlignment.Near,
+                shadow,
+                metrics);
+        }
 
         var bodyLeft = left + iconWidth + (int)Math.Round(spaceAdvance, MidpointRounding.AwayFromZero);
         DrawAlignedText(
@@ -1548,6 +1552,8 @@ internal sealed class TokenStripForm : Form
     /// <summary>The strip's leading glyph, split from the numbers so it can be drawn at its own size.</summary>
     internal static (string Icon, string Body) SplitLeadingIcon(string text)
     {
+        if (text.StartsWith("📌 ", StringComparison.Ordinal))
+            return ("📌", text[3..]);
         if (text.Length > 1 && text[0] == '\u26A1')
         {
             var body = text[1] == ' ' ? text[2..] : text[1..];
@@ -1558,6 +1564,10 @@ internal sealed class TokenStripForm : Form
     }
 
     /// <summary>The width the strip line will occupy, in device pixels, using the same split layout.</summary>
+    private static float IconAdvance(Graphics graphics, string icon, Font font, StringFormat format) =>
+        icon == "📌" ? font.GetHeight(graphics)
+            : graphics.MeasureString(icon, font, new SizeF(512f, 512f), format).Width;
+
     private static double MeasureStripLine(Graphics graphics, string text, Font textFont, Font iconFont)
     {
         var (icon, body) = SplitLeadingIcon(text);
@@ -1567,7 +1577,7 @@ internal sealed class TokenStripForm : Form
             return graphics.MeasureString(text, textFont, new SizeF(8192f, 512f), format).Width;
         }
 
-        return graphics.MeasureString(icon, iconFont, new SizeF(512f, 512f), format).Width
+        return IconAdvance(graphics, icon, iconFont, format)
             + MeasureSpaceAdvance(graphics, textFont)
             + graphics.MeasureString(body, textFont, new SizeF(8192f, 512f), format).Width;
     }
@@ -1655,6 +1665,7 @@ internal sealed class TokenStripForm : Form
         if (disposing)
         {
             CancelEditGesture();
+            _chatTip.Dispose();
             Region?.Dispose();
             Region = null;
         }

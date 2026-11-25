@@ -258,6 +258,53 @@ internal static class RenderProbe
             TextClipped: TextClipped(stats, size, textOnly: true));
     }
 
+    internal static void CaptureSavedChat(string directory, OverlaySettings settings, ChatBinding binding,
+        TokenSnapshot snapshot)
+    {
+        Directory.CreateDirectory(directory);
+        OverlayPresentation Present(TokenSnapshot value) => OverlayPresentationBuilder.WithChat(
+            OverlayPresentationBuilder.Create(value, settings.CollapsedPrimaryField,
+                settings.CollapsedSecondaryField, settings.VisibleFields), binding, value);
+        var original = Present(snapshot);
+        var longTitle = Present(snapshot with { Title = new string('W', 1800) });
+        if (!original.Variants.SequenceEqual(longTitle.Variants) || original.StatusText is not null)
+            throw new InvalidOperationException("The chat title changed the compact presentation.");
+
+        foreach (var (dpi, narrow) in new[] { (96u, false), (144u, true) })
+        {
+            using var form = new TokenStripForm();
+            form.SetTransparentBackground(false);
+            form.ApplyTheme(OverlayThemePalette.For(OverlayThemeKind.Dark));
+            form.SetPresentation(narrow ? longTitle : original);
+            var widths = form.MeasureCapsuleWidthsDip(dpi);
+            var budget = narrow ? Math.Ceiling(widths[^1]) : 600;
+            var index = Array.FindIndex(widths, width => width <= budget);
+            if (index < 0 || narrow && index == 0)
+                throw new InvalidOperationException("No suitable compact layout.");
+            form.SetCapsuleVariant(index);
+            var layout = CalculateLayout(form, dpi, new IntRect(0, 0, 1600, 900));
+            form.ApplyLayout(layout);
+            using var background = new Form
+            {
+                FormBorderStyle = FormBorderStyle.None, StartPosition = FormStartPosition.Manual,
+                Bounds = form.Bounds, BackColor = Color.White, ShowInTaskbar = false, TopMost = true
+            };
+            background.Show();
+            form.Show();
+            form.TopMost = true;
+            form.BringToFront();
+            form.RefreshSurface();
+            Application.DoEvents();
+            Thread.Sleep(180);
+            Application.DoEvents();
+            using var image = new Bitmap(form.Width, form.Height);
+            using var graphics = Graphics.FromImage(image);
+            graphics.CopyFromScreen(form.Location, Point.Empty, form.Size);
+            image.Save(Path.Combine(directory, $"manual-{dpi}dpi.png"), ImageFormat.Png);
+            Console.WriteLine($"{dpi} DPI: {form.CurrentCapsuleVariantText}");
+        }
+    }
+
     private static OverlayLayoutResult CalculateLayout(
         TokenStripForm form,
         uint dpi,

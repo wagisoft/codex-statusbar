@@ -161,9 +161,8 @@ internal readonly record struct StartupStatus(
         string? registeredCommand,
         string executablePath)
     {
-        // First run of a build that has this feature: opt in once. After that the user's choice is
-        // the only thing that matters — an upgrade must never silently re-enable what they turned off.
-        var desired = configured ? startWithWindows : true;
+        // Leave a fresh installation disabled. Preserve explicit preferences on upgrade.
+        var desired = configured && startWithWindows;
 
         if (!desired)
         {
@@ -213,7 +212,7 @@ internal static class StartupCoordinator
     public static StartupApplyResult Apply(OverlaySettings settings, string executablePath, out bool settingsChanged)
     {
         var configured = settings.StartupConfigured;
-        var desired = configured ? settings.StartWithWindows : true;
+        var desired = configured && settings.StartWithWindows;
         var firstRun = !configured;
         var registered = StartupManager.Read();
         var action = StartupStatus.ResolveAction(configured, settings.StartWithWindows, registered, executablePath);
@@ -222,7 +221,7 @@ internal static class StartupCoordinator
         var outcome = action switch
         {
             StartupRegistryAction.Enable => StartupManager.Enable(executablePath, out error)
-                ? "enabled (first run)"
+                ? "enabled"
                 : "enable failed",
             StartupRegistryAction.RepairPath => StartupManager.Enable(executablePath, out error)
                 ? "enabled (path repaired)"
@@ -240,7 +239,7 @@ internal static class StartupCoordinator
         settings.StartWithWindows = desired;
         settings.StartupConfigured = true;
 
-        return new StartupApplyResult(effective, firstRun, outcome, error);
+        return new StartupApplyResult(effective, FirstRunOptIn: false, outcome, error);
     }
 
     /// <summary>The tray toggle. Marks the setting as configured so no later launch re-enables it.</summary>

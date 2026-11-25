@@ -104,6 +104,26 @@ internal static class SelfTest
         Section("lifecycle: Codex identity, start with Windows, attach ladder");
         RunLifecycle(stdout);
 
+        Section("chat binding settings and chooser");
+        var chatSettings = OverlaySettings.CreateDefault();
+        Check("a new profile uses automatic selection", ChatBinding.Resolve(chatSettings, null).Mode, ChatBindingMode.Automatic);
+        chatSettings.RememberChat("thread-1111");
+        chatSettings.RememberChat("thread-2222");
+        chatSettings.RememberChat("THREAD-1111");
+        var recoveredChat = OverlaySettings.ParseJson(chatSettings.Serialize()).Settings;
+        Check("restart keeps the chosen chat", ChatBinding.Resolve(recoveredChat, null).ThreadId, "THREAD-1111");
+        Check("restart keeps manual mode", recoveredChat.ChatMode, ChatBindingMode.Manual);
+        Check("recent chats deduplicate without reordering", string.Join(",", recoveredChat.RecentChatIds), "THREAD-1111,thread-2222");
+        Check("CLI overrides without mutating the saved choice", ChatBinding.Resolve(recoveredChat, "thread-3333").ThreadId, "thread-3333");
+        recoveredChat.ChatMode = ChatBindingMode.Automatic;
+        Check("automatic mode has no manual route", ChatBinding.Resolve(recoveredChat, null).ThreadId is null, true);
+        Check("switching back can reuse the saved chat", recoveredChat.ManualChatId, "THREAD-1111");
+        var pickerChat = new ChatEntry("thread-1111", "Design review", @"C:\worktrees\economy-core",
+            "https://example.test/team/_git/OilEmpire", 0, false);
+        Check("remote repository names group related worktrees", pickerChat.Project, "OilEmpire");
+        Check("project, title and working directory are searchable",
+            pickerChat.Matches("oilempire") && pickerChat.Matches("design") && pickerChat.Matches("economy-core"), true);
+
         Section("position fast path: pure move, coalescing, burst tail, DPI/monitor");
         RunPositionFastPath(stdout);
 
@@ -964,9 +984,9 @@ internal static class SelfTest
 
         // --- the reconcile decision table: first-run only, then the user's choice ---
         Check(
-            "first run (never configured) registers itself",
+            "first run keeps Windows startup disabled",
             StartupStatus.ResolveAction(false, false, null, exe),
-            StartupRegistryAction.Enable);
+            StartupRegistryAction.None);
         Check(
             "after the user turned it off, a later launch never re-enables it",
             StartupStatus.ResolveAction(true, false, null, exe),
@@ -992,9 +1012,9 @@ internal static class SelfTest
                 exe),
             StartupRegistryAction.RepairPath);
         Check(
-            "first run with an already-correct value writes nothing",
+            "first run removes a legacy registration without explicit opt-in",
             StartupStatus.ResolveAction(false, false, StartupManager.BuildCommand(exe), exe),
-            StartupRegistryAction.None);
+            StartupRegistryAction.Disable);
 
         // --- the attach ladder ---
         Check("the first attach attempt is immediate", LifecycleRules.DelayForAttempt(0), 0);
@@ -1054,7 +1074,7 @@ internal static class SelfTest
             "{\"settingsVersion\":4,\"startWithWindows\":false,\"startupConfigured\":true}");
         Check("a v4 file that turned it off stays off", turnedOff.Settings.StartWithWindows, false);
         Check("and is already configured, so nothing re-enables it", turnedOff.Settings.StartupConfigured, true);
-        Check("a current file is not rewritten", turnedOff.MustPersist, false);
+        Check("the v4 startup preference migrates with the chat settings", turnedOff.MustPersist, true);
 
         var turnedOn = OverlaySettings.ParseJson(
             "{\"settingsVersion\":4,\"startWithWindows\":true,\"startupConfigured\":true}");

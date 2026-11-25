@@ -150,6 +150,9 @@ internal sealed class OverlaySettings
         // --- v4: lifecycle / start with Windows ---
         public bool? StartWithWindows { get; set; }
         public bool? StartupConfigured { get; set; }
+        public string? ChatMode { get; set; }
+        public string? ManualChatId { get; set; }
+        public string[]? RecentChatIds { get; set; }
 
         // --- v1 layout keys, still written for backward compatibility ---
         public int? AnchorMode { get; set; }
@@ -168,7 +171,7 @@ internal sealed class OverlaySettings
         public double? OffsetYDip { get; set; }
     }
 
-    public const int CurrentSettingsVersion = 4;
+    public const int CurrentSettingsVersion = 5;
 
     /// <summary>
     /// The gap between the strip's right edge and the Context indicator's left edge, in DIP. The
@@ -220,6 +223,17 @@ internal sealed class OverlaySettings
     /// read as <c>false</c>, and only the former may be opted in on the user's behalf.
     /// </summary>
     public bool StartupConfigured { get; set; }
+    public ChatBindingMode ChatMode { get; set; }
+    public string? ManualChatId { get; private set; }
+    public IReadOnlyList<string> RecentChatIds { get; private set; } = [];
+
+    public void RememberChat(string id)
+    {
+        if (!TokenLogMonitor.IsPlausibleThreadId(id)) return;
+        ManualChatId = id;
+        ChatMode = ChatBindingMode.Manual;
+        RecentChatIds = RecentChatIds.Prepend(id).Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToArray();
+    }
 
     public static OverlaySettings CreateDefault()
     {
@@ -321,12 +335,15 @@ internal sealed class OverlaySettings
                 persisted.FixedScreenX ?? 0,
                 persisted.FixedScreenY ?? 0);
 
-            // v4: lifecycle. Both fields stay as written; the first-run opt-in is applied by
-            // StartupCoordinator at launch, which is the only place that can also see the registry.
-            // An absent `startupConfigured` means "never configured", including for a v3 file being
-            // upgraded — and that is exactly the case that gets the default-on treatment once.
+            // Preserve explicitly configured startup preferences. New profiles default to off.
             settings.StartWithWindows = persisted.StartWithWindows ?? false;
             settings.StartupConfigured = persisted.StartupConfigured ?? false;
+            settings.ManualChatId = persisted.ManualChatId is { } id && TokenLogMonitor.IsPlausibleThreadId(id) ? id : null;
+            settings.ChatMode = string.Equals(persisted.ChatMode, "Manual", StringComparison.OrdinalIgnoreCase)
+                ? ChatBindingMode.Manual : ChatBindingMode.Automatic;
+            settings.RecentChatIds = (persisted.RecentChatIds ?? [])
+                .Where(id => id is not null && TokenLogMonitor.IsPlausibleThreadId(id))
+                .Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToArray();
 
             // Migration. A v2 file always wrote `positionMode`, and v2's default was FollowCodex, so
             // an explicit choice of FollowCodex is indistinguishable from never having touched it.
@@ -373,6 +390,9 @@ internal sealed class OverlaySettings
             // v4: lifecycle.
             StartWithWindows = StartWithWindows,
             StartupConfigured = StartupConfigured,
+            ChatMode = ChatMode.ToString(),
+            ManualChatId = ManualChatId,
+            RecentChatIds = RecentChatIds.ToArray(),
 
             // v1 keys, kept so an older build can still read this file.
             AnchorMode = (int)SanitizeAnchorMode((int)AnchorMode),
@@ -511,13 +531,13 @@ internal sealed class OverlaySettings
 
             if (index + 1 >= args.Count || string.IsNullOrWhiteSpace(args[index + 1]))
             {
-                throw new ArgumentException("--settings 后必须提供绝对设置文件路径。", nameof(args));
+                throw new ArgumentException("Provide an absolute settings file path after --settings.", nameof(args));
             }
 
             var candidate = args[index + 1];
             if (!Path.IsPathFullyQualified(candidate))
             {
-                throw new ArgumentException("--settings 只接受绝对设置文件路径。", nameof(args));
+                throw new ArgumentException("--settings requires an absolute settings file path.", nameof(args));
             }
 
             return Path.GetFullPath(candidate);
@@ -619,7 +639,7 @@ internal static class SettingsProbe
                 "Select" => Select(probeCase),
                 "Load" => Load(probeCase),
                 "SaveReload" => SaveReload(probeCase),
-                _ => throw new ArgumentException($"不支持的设置探针操作：{probeCase.Operation}")
+                _ => throw new ArgumentException($"Unsupported settings probe operation: {probeCase.Operation}")
             };
             results.Add(new SettingsProbeCaseResult(probeCase.Name, result.Settings, result.MustPersist));
         }
@@ -633,7 +653,7 @@ internal static class SettingsProbe
         if (!Enum.TryParse<CollapsedSlot>(probeCase.Slot, ignoreCase: true, out var slot)
             || !probeCase.Field.HasValue)
         {
-            throw new ArgumentException("Select 设置探针需要有效的 Slot 和 Field。", nameof(probeCase));
+            throw new ArgumentException("Select requires a valid Slot and Field.", nameof(probeCase));
         }
 
         result.Settings.SelectCollapsedField(slot, (DisplayField)probeCase.Field.Value);
@@ -674,7 +694,7 @@ internal static class SettingsProbe
     private static string RequireJson(SettingsProbeCase probeCase)
     {
         return probeCase.Json ?? throw new ArgumentException(
-            "设置探针操作需要 Json。",
+            "The settings probe requires Json.",
             nameof(probeCase));
     }
 
@@ -684,7 +704,7 @@ internal static class SettingsProbe
             || !Path.IsPathFullyQualified(probeCase.SettingsPath))
         {
             throw new ArgumentException(
-                "设置探针需要绝对临时设置路径。",
+                "The settings probe requires an absolute temporary settings path.",
                 nameof(probeCase));
         }
 
@@ -693,7 +713,7 @@ internal static class SettingsProbe
         if (!path.StartsWith(temporaryRoot, StringComparison.OrdinalIgnoreCase))
         {
             throw new ArgumentException(
-                "设置探针只能使用临时设置路径。",
+                "The settings probe requires a path in the temporary directory.",
                 nameof(probeCase));
         }
 

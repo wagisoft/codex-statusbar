@@ -43,7 +43,7 @@ internal readonly record struct AnchorVector(int Column, int Row)
         AttachmentReferencePoint.BottomLeft => new AnchorVector(-1, +1),
         AttachmentReferencePoint.BottomCenter => new AnchorVector(0, +1),
         AttachmentReferencePoint.BottomRight => new AnchorVector(+1, +1),
-        _ => throw new ArgumentOutOfRangeException(nameof(point), point, "未知的锚点。")
+        _ => throw new ArgumentOutOfRangeException(nameof(point), point, "Unknown anchor.")
     };
 
     public AttachmentReferencePoint ToPoint() => (Column, Row) switch
@@ -57,7 +57,7 @@ internal readonly record struct AnchorVector(int Column, int Row)
         (-1, +1) => AttachmentReferencePoint.BottomLeft,
         (0, +1) => AttachmentReferencePoint.BottomCenter,
         (+1, +1) => AttachmentReferencePoint.BottomRight,
-        _ => throw new ArgumentOutOfRangeException(nameof(Column), this, "未知的锚点向量。")
+        _ => throw new ArgumentOutOfRangeException(nameof(Column), this, "Unknown anchor vector.")
     };
 
     /// <summary>The point this vector names inside <paramref name="rect"/>.</summary>
@@ -360,14 +360,14 @@ internal sealed class ManualPlacementEditState
     public bool IsActive => _draft is not null;
 
     public ManualPlacementSnapshot Draft =>
-        _draft ?? throw new InvalidOperationException("手动定位编辑尚未开始。");
+        _draft ?? throw new InvalidOperationException("Manual positioning has not started.");
 
     public void Begin(ManualPlacementSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         if (IsActive)
         {
-            throw new InvalidOperationException("手动定位编辑已经开始。");
+            throw new InvalidOperationException("Manual positioning has already started.");
         }
 
         _original = snapshot;
@@ -404,7 +404,7 @@ internal sealed class ManualPlacementEditState
     {
         _ = Draft;
         var original = _original
-            ?? throw new InvalidOperationException("手动定位编辑尚未开始。");
+            ?? throw new InvalidOperationException("Manual positioning has not started.");
         End();
         return original;
     }
@@ -575,7 +575,7 @@ internal sealed class ManualAttachmentCoordinator
     {
         if (!CanSave)
         {
-            throw new InvalidOperationException("当前手势没有有效的 Codex 吸附目标。");
+            throw new InvalidOperationException("No Codex snap target is available for this gesture.");
         }
 
         var committed = _editState.Commit() with { Enabled = true };

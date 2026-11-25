@@ -17,7 +17,7 @@ internal sealed record OverlayPresentation(
     bool ShowContextProgress,
     string? StatusText,
     string? CapsuleText = null,
-    IReadOnlyList<string>? CapsuleVariants = null)
+    IReadOnlyList<string>? CapsuleVariants = null, string? ChatDetails = null)
 {
     /// <summary>
     /// The collapsed strip's text at every supported verbosity, widest first. The last entry is the
@@ -116,6 +116,39 @@ internal static class OverlayPresentationBuilder
             BuildCapsuleVariants(snapshot));
     }
 
+    internal static OverlayPresentation WithChat(OverlayPresentation presentation, ChatBinding binding, TokenSnapshot? snapshot)
+    {
+        var manual = binding.Mode == ChatBindingMode.Manual;
+        var id = manual ? binding.ThreadId : snapshot?.ThreadId;
+        var details = new List<OverlayMetric>();
+        void Add(string label, string? value)
+        {
+            var text = string.IsNullOrWhiteSpace(value) ? "—" : SanitizeSingleLine(value);
+            details.Add(new OverlayMetric(DisplayField.Thread, label, label, text, true));
+        }
+        Add("Chat", snapshot?.Title);
+        Add("Project", snapshot?.Project);
+        Add("Binding", manual ? binding.FromCommandLine ? "Manual (--thread)" : "Manual" : "Automatic");
+        Add("Chat ID", id);
+        var variants = presentation.Variants.Select(value => manual
+            ? "📌 " + value.TrimStart('⚡', ' ') : value).ToArray();
+        var panelRows = new List<OverlayMetric>(details);
+        if (id?.Length == 36)
+        {
+            var idRow = panelRows[^1];
+            panelRows[^1] = idRow with { Value = id[..18] };
+            panelRows.Add(idRow with { ExpandedLabel = "", Value = id[18..] });
+        }
+        return presentation with
+        {
+            StatusText = null,
+            CapsuleText = variants.FirstOrDefault(),
+            CapsuleVariants = variants,
+            ChatDetails = string.Join(Environment.NewLine, details.Select(row => $"{row.ExpandedLabel}: {row.Value}")),
+            ExpandedRows = presentation.ExpandedRows.Where(row => row.Field != DisplayField.Thread).Concat(panelRows).ToArray()
+        };
+    }
+
     public static string FormatTokenCount(long value) => value switch
     {
         >= 1_000_000 => (value / 1_000_000d).ToString("0.00", CultureInfo.InvariantCulture) + "M",
@@ -148,18 +181,18 @@ internal static class OverlayPresentationBuilder
     {
         return field switch
         {
-            DisplayField.Total => "总 token",
-            DisplayField.Input => "输入 token",
-            DisplayField.Output => "输出 token",
-            DisplayField.CacheHit => "缓存命中",
-            DisplayField.CacheHitRate => "缓存命中率",
-            DisplayField.CacheMiss => "缓存未命中（推导）",
-            DisplayField.Context => "上下文用量",
-            DisplayField.ContextPercent => "上下文百分比",
-            DisplayField.Reasoning => "推理输出",
-            DisplayField.Thread => "会话 ID",
-            DisplayField.Tps => "输出速度 TPS",
-            _ => throw new ArgumentOutOfRangeException(nameof(field), field, "不支持的展示字段。")
+            DisplayField.Total => "Total tokens",
+            DisplayField.Input => "Input tokens",
+            DisplayField.Output => "Output tokens",
+            DisplayField.CacheHit => "Cache hits",
+            DisplayField.CacheHitRate => "Cache hit rate",
+            DisplayField.CacheMiss => "Cache misses (calculated)",
+            DisplayField.Context => "Context usage",
+            DisplayField.ContextPercent => "Context percentage",
+            DisplayField.Reasoning => "Reasoning output",
+            DisplayField.Thread => "Chat ID",
+            DisplayField.Tps => "Output speed (tokens/s)",
+            _ => throw new ArgumentOutOfRangeException(nameof(field), field, "Unsupported display field.")
         };
     }
 
@@ -190,7 +223,7 @@ internal static class OverlayPresentationBuilder
         if (!DisplayFieldRules.IsSingleSupported(primaryField)
             || !DisplayFieldRules.IsSingleSupported(secondaryField))
         {
-            throw new ArgumentException("收起指标必须是受支持的单个字段。");
+            throw new ArgumentException("Select one supported metric for the collapsed view.");
         }
     }
 
@@ -232,7 +265,7 @@ internal static class OverlayPresentationBuilder
             DisplayField.Reasoning => FormatTokenCount(snapshot.ReasoningOutputTokens),
             DisplayField.Thread => ShortThreadId(snapshot.ThreadId),
             DisplayField.Tps => FormatTpsValue(snapshot),
-            _ => throw new ArgumentOutOfRangeException(nameof(field), field, "不支持的展示字段。")
+            _ => throw new ArgumentOutOfRangeException(nameof(field), field, "Unsupported display field.")
         };
         var hasValue = field != DisplayField.Thread || !string.IsNullOrWhiteSpace(snapshot.ThreadId);
         return new OverlayMetric(field, labels.Compact, labels.Expanded, value, hasValue);
@@ -242,18 +275,18 @@ internal static class OverlayPresentationBuilder
     {
         return field switch
         {
-            DisplayField.Total => ("总", "总 Token"),
-            DisplayField.Input => ("入", "输入"),
-            DisplayField.Output => ("出", "输出"),
-            DisplayField.CacheHit => ("命中", "缓存命中"),
-            DisplayField.CacheHitRate => ("命中率", "缓存命中率"),
-            DisplayField.CacheMiss => ("未中", "缓存未命中"),
-            DisplayField.Context => ("上下文", "上下文用量"),
-            DisplayField.ContextPercent => ("上下文", "上下文占用"),
-            DisplayField.Reasoning => ("推理", "推理输出"),
-            DisplayField.Thread => ("会话", "会话"),
-            DisplayField.Tps => ("⚡", "输出速度"),
-            _ => throw new ArgumentOutOfRangeException(nameof(field), field, "不支持的展示字段。")
+            DisplayField.Total => ("Total", "Total tokens"),
+            DisplayField.Input => ("In", "Input"),
+            DisplayField.Output => ("Out", "Output"),
+            DisplayField.CacheHit => ("Hits", "Cache hits"),
+            DisplayField.CacheHitRate => ("Hit rate", "Cache hit rate"),
+            DisplayField.CacheMiss => ("Misses", "Cache misses"),
+            DisplayField.Context => ("Context", "Context usage"),
+            DisplayField.ContextPercent => ("Context", "Context utilization"),
+            DisplayField.Reasoning => ("Reasoning", "Reasoning output"),
+            DisplayField.Thread => ("Chat", "Chat"),
+            DisplayField.Tps => ("⚡", "Output speed"),
+            _ => throw new ArgumentOutOfRangeException(nameof(field), field, "Unsupported display field.")
         };
     }
 
@@ -302,7 +335,7 @@ internal static class PresentationProbe
             var presentation = probeCase.Operation switch
             {
                 "Create" => OverlayPresentationBuilder.Create(
-                    probeCase.Snapshot ?? throw new ArgumentException("Create 操作需要 Snapshot。", nameof(probeCase)),
+                    probeCase.Snapshot ?? throw new ArgumentException("Create requires Snapshot.", nameof(probeCase)),
                     primaryField,
                     secondaryField,
                     visibleFields),
@@ -311,7 +344,7 @@ internal static class PresentationProbe
                     primaryField,
                     secondaryField,
                     visibleFields),
-                _ => throw new ArgumentException($"不支持的展示探针操作：{probeCase.Operation}", nameof(probeCase))
+                _ => throw new ArgumentException($"Unsupported presentation probe operation: {probeCase.Operation}", nameof(probeCase))
             };
             results.Add(new PresentationProbeCaseResult(probeCase.Name, presentation));
         }
@@ -323,7 +356,7 @@ internal static class PresentationProbe
     {
         if (!value.HasValue)
         {
-            throw new ArgumentException("展示探针需要字段。", parameterName);
+            throw new ArgumentException("The presentation probe requires a field.", parameterName);
         }
 
         return (DisplayField)value.Value;
