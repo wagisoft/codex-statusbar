@@ -194,7 +194,7 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
         {
             if (_monitor is { } monitor)
             {
-                monitor.PinActiveSession = _pinSessionMenuItem.Checked;
+                monitor.PinActiveSession = monitor.IsForcedPin || _pinSessionMenuItem.Checked;
             }
 
             _pinSessionMenuItem.Text = _pinSessionMenuItem.Checked ? "已锁定当前会话" : "锁定当前会话";
@@ -728,7 +728,8 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
     /// </summary>
     private void AttachSubsystems(CodexProcessInfo info)
     {
-        _routeMonitor.Start();
+        if (string.IsNullOrWhiteSpace(_forcedThreadId))
+            _routeMonitor.Start();
         _monitor ??= CreateMonitor();
         _dockTracker.Enabled = _settings.PositionMode == OverlayPositionMode.ComposerContextLeft;
 
@@ -1380,7 +1381,7 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
             var shortPendingId = string.IsNullOrWhiteSpace(_pendingThreadId)
                 ? "等待识别"
                 : OverlayPresentationBuilder.ShortThreadId(_pendingThreadId);
-            _pinSessionMenuItem.Enabled = !string.IsNullOrWhiteSpace(_pendingThreadId);
+            _pinSessionMenuItem.Enabled = !string.IsNullOrWhiteSpace(_pendingThreadId) && _forcedThreadId is null;
             _presentation = OverlayPresentationBuilder.CreateWaiting(
                 $"等待会话 {shortPendingId} 的 token 数据…",
                 _settings.CollapsedPrimaryField,
@@ -1397,8 +1398,8 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
             _debug.Write(snapshot);
             RefreshPresentation();
             var shortId = OverlayPresentationBuilder.ShortThreadId(snapshot.ThreadId);
-            _pinSessionMenuItem.Enabled = true;
-            _trayIcon.Text = TrimTrayText(
+            _pinSessionMenuItem.Enabled = !string.IsNullOrWhiteSpace(snapshot.ThreadId) && _forcedThreadId is null;
+            _trayIcon.Text = string.IsNullOrEmpty(snapshot.ThreadId) ? "Codex · " + snapshot.Source : TrimTrayText(
                 $"Codex {shortId} · {OverlayPresentationBuilder.FormatTokenCount(snapshot.TotalTokens)} tokens");
             UpdateSessionMenuText();
         }
@@ -1465,14 +1466,7 @@ internal sealed class OverlayContext : ApplicationContext, IFastPathTarget
                 var routeStatus = _routeMonitor.GetStatus();
                 if (!monitor.PinActiveSession)
                 {
-                    if (!string.IsNullOrWhiteSpace(routeStatus.ThreadId))
-                    {
-                        monitor.PreferredThreadId = routeStatus.ThreadId;
-                    }
-                    else if (!routeStatus.IsConnected)
-                    {
-                        monitor.PreferredThreadId = null;
-                    }
+                    monitor.ObserveDesktopRoute(routeStatus);
                 }
                 var snapshot = monitor.Poll();
                 return (

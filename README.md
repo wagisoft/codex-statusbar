@@ -173,7 +173,7 @@ never `NaN`, never `0%`.
 | TPS | rollout `event_msg/item_completed` (`started_at_ms`, `completed_at_ms`) + per-response official `output_tokens` | none — `--` if unavailable |
 | Total | rollout cumulative usage (`input + output`) | `state_5.sqlite` → `threads.tokens_used` |
 | Cache | rollout cumulative usage (`cached_input_tokens`, `input_tokens`) | none |
-| **which conversation is active** | **`\\.\pipe\codex-ipc` broadcast `thread-stream-following-changed` → `conversationId`** | `state_5.sqlite` → `threads` ordered by `recency_at_ms` |
+| **which conversation is active** | **`\\.\pipe\codex-ipc` broadcast `thread-stream-following-changed` → `conversationId`** | `state_5.sqlite` → `threads` by independently verified route ID only |
 | TTFT / turn duration | rollout `event_msg/task_complete` (`time_to_first_token_ms`, `duration_ms`) | none |
 
 Every source is opened **read-only**. Session files are never modified. No network access, no
@@ -234,7 +234,7 @@ Two measured traps, both fixed and pinned by the self-test:
 
 | situation | behaviour |
 |---|---|
-| Codex not started / `codex-ipc` absent | reconnects with exponential backoff (350 ms → 5 s), no busy-loop; falls back to `state_5.sqlite` and reports `active-thread-source = sqlite-fallback` |
+| Codex not started / `codex-ipc` absent | reconnects with exponential backoff (350 ms → 5 s), no busy-loop; shows placeholders and reports `desktop-pipe-unavailable` |
 | Codex restarts / Electron reloads | the pipe disappears and is re-created; the monitor reconnects on its own and flips back to `active-thread-source = ipc` |
 | `initialize` fails or a frame is malformed | the frame is skipped, the listener reconnects; one bad message never kills the listener |
 | app-server/file unavailable | Total and Cache still work from the session file; TPS shows `--` |
@@ -566,9 +566,10 @@ Warnings:            none
 
 Field notes:
 
-* **`Active thread source`** is `ipc` (Codex's own broadcast selected the conversation),
-  `sqlite-fallback` (the recency-ordered database did), `rollout` (a newly created rollout file
-  did) or `none`. It flips back to `ipc` automatically once the pipe is available again.
+* **`Active thread source`** reports `forced` for an explicit pin or `desktop-document` / `ipc` for a verified
+  Desktop route. Diagnostics distinguish `desktop-pipe-unavailable`, `waiting-for-desktop-route`,
+  `ambiguous-desktop-windows` and `unverified-desktop-session`. Database recency and file activity
+  never select a conversation.
 * **`Total`** is printed as `Input + Output`, i.e. literally the documented formula, not the
   carrier's own `total_tokens` field.
 * **`Merged model elapsed ms`** is the interval *union*, and **`Model intervals`** lists the
@@ -753,26 +754,19 @@ regenerates it from *your* Codex build (see §9).
    only updates when that response completes. This is a limitation of what Codex exposes, not a
    smoothed-over guess — the alternative would be to invent a number, which this project refuses
    to do.
-2. **The `codex-ipc` pipe is an internal, undocumented Codex interface.** It is the only way to
-   learn which conversation is displayed, and OpenAI may change it. If it breaks, the strip falls
-   back to `recency_at_ms` ordering and stops following switches to *idle* conversations; totals
-   and cache stay correct.
-3. **Multi-window is not reliably supported, and is not hacked around.** Single-window behaviour is
-   correct; with two Codex windows open the following applies, from the protocol itself:
-   * The IPC broadcast *does* identify the window — it carries `sourceClientId` (one per window) and
-     `targetClientIds` — and the monitor keys its map by `sourceClientId + hostId`, so it tracks
-     which window follows which conversation.
-   * But it follows the **most recently changed** window, because that is the only ordering the
-     broadcast provides. It cannot know which Codex window has OS focus.
-   * Meanwhile the overlay attaches to the **foreground** Codex window's geometry. So with two
-     windows the strip may sit against one window while showing the other window's conversation.
-   This was verified as far as it can be without synthesising input into the user's app: a second
-   window could not be opened programmatically (`SetForegroundWindow` is blocked by Windows, so the
-   keystroke could not be delivered safely), and only one Codex IPC client was ever observed. No
-   fragile workaround was added.
-4. **Which thread is "current" is only as good as Codex's own report.** If Codex reports a
-   followed conversation for a window that is not the one you are reading, the strip follows Codex,
-   not the pixels.
+2. **Desktop 26.1120.6357.0 compatibility.** The legacy pipe can be absent. Its replacement
+   is unconfirmed. The package still contains the pipe name and a local chat route, but the legacy
+   event name was absent from its app.asar. The monitor checks the foreground Chromium document
+   for an exact app://-/local/UUID route (including hash-router forms). If the renderer omits its URL,
+   the document cannot identify the chat. App-server lists stored or loaded threads and provides no documented mapping
+   to the displayed window. Use `--thread ID` when no unique desktop route is available.
+3. **Concurrent windows.** With no exact foreground document URL, IPC requires one reported route and one foreground
+   Desktop chat window. An unconfirmed window reports `unverified-foreground-window`.
+4. **Session verification.** Automatic selection checks the matching unarchived SQLite row for
+   Desktop user-source and agent metadata, then checks the first rollout record for its ID,
+   originator and source. An unknown database schema leaves metrics unavailable.
+   An `item:Extension` diagnostic flags an unrecognised completed item. Its interval is excluded
+   from model-output TPS. Cumulative token counts come from independent usage records.
 5. **Very short turns have noisy TPS.** The model-time signal has roughly millisecond resolution, so
    a response whose whole model window is only tens of milliseconds cannot yield a meaningful rate.
    The value is still shown (it is official data), and the debug log prints the window so you can

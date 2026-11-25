@@ -59,6 +59,27 @@ internal static class SelfTest
             RunLegacyFixture(legacyFixture, stdout);
         }
 
+        Section("desktop route confidence");
+        const string id = "ab913717-3734-41ef-962c-64b113bd686a";
+        Check("local Desktop document", DesktopDocumentRoute.Parse("app://-/local/" + id), id);
+        Check("embedded external URL", DesktopDocumentRoute.Parse("https://example.org/local/" + id) is null, true);
+        Check("non-chat route", DesktopDocumentRoute.Parse("app://-/settings") is null, true);
+        Check("nested route", DesktopDocumentRoute.Parse("app://-/local/" + id + "/child") is null, true);
+        var missingHome = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        using (var monitor = new TokenLogMonitor(Path.Combine(missingHome, "sessions")))
+        {
+            monitor.ApplyRoute(new ActiveThreadRouteStatus(null, 0, false, 1, null));
+            Check("missing pipe", monitor.Poll()?.Source, "desktop-pipe-unavailable");
+            monitor.ApplyRoute(new ActiveThreadRouteStatus("unknown-thread", 1, true, 2, null));
+            Check("unverified route", monitor.Poll()?.Source, "unverified-desktop-session");
+            monitor.ApplyRoute(new ActiveThreadRouteStatus(null, 2, true, 3, null));
+            Check("ambiguous windows", monitor.Poll()?.ThreadId, "");
+            Check("ambiguous diagnostic", monitor.Poll()?.Source, "ambiguous-desktop-windows");
+            monitor.IsForcedPin = monitor.PinActiveSession = true;
+            monitor.PreferredThreadId = "explicit-thread";
+            Check("manual selection", monitor.Poll()?.ThreadId, "explicit-thread");
+        }
+
         Section("deduplication: the same usage must never be counted twice");
         RunDeduplication(stdout);
 
@@ -180,9 +201,17 @@ internal static class SelfTest
             CodexThemeSource.Parse(["appearanceTheme = \"solarized\""]), CodexThemeKind.Unknown);
         Check("Codex theme: a trailing comment is tolerated",
             CodexThemeSource.Parse(["appearanceTheme = \"light\"  # or dark"]), CodexThemeKind.Light);
-        Check("Codex theme: the real config file on this machine parses",
-            CodexThemeSource.Read(CodexThemeSource.DefaultConfigPath) != CodexThemeKind.Unknown,
-            true);
+        var config = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(config, "[desktop]\nappearanceTheme = \"light\"");
+            Check("Codex theme: read configured file", CodexThemeSource.Read(config), CodexThemeKind.Light);
+        }
+        finally
+        {
+            File.Delete(config);
+        }
+
     }
 
     /// <summary>Folds the whole position suite into the default gate instead of duplicating it.</summary>

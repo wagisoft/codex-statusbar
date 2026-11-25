@@ -4,7 +4,7 @@ using System.Text;
 
 namespace CodexStatusbar;
 
-internal sealed record CodexWindowTarget(CodexWindowInfo HostWindow);
+internal sealed record CodexWindowTarget(CodexWindowInfo HostWindow, bool IsOnlyChatWindow = false);
 
 internal sealed record WindowSurfaceCandidate(
     long Handle,
@@ -453,7 +453,10 @@ internal static class CodexWindowLocator
             return false;
         }
 
-        target = new CodexWindowTarget(hostWindow);
+        var hostCount = candidates.Count(item => item.IsVisible && item.OwnerHandle == IntPtr.Zero
+            && item.ClassName == "Chrome_WidgetWin_1"
+            && (item.ExtendedStyle & CodexWindowClassifier.WsExToolWindow) == 0);
+        target = new CodexWindowTarget(hostWindow, hostCount == 1);
         return true;
     }
 

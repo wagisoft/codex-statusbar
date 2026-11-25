@@ -163,7 +163,7 @@ cache_hit_rate = Σ cached_input_tokens / Σ input_tokens × 100%
 | TPS | rollout 的 `event_msg/item_completed`（`started_at_ms`、`completed_at_ms`）+ 每个响应的官方 `output_tokens` | 无 —— 取不到就显示 `--` |
 | Total | rollout 中的累计用量（`input + output`） | `state_5.sqlite` → `threads.tokens_used` |
 | Cache | rollout 中的累计用量（`cached_input_tokens`、`input_tokens`） | 无 |
-| **当前活跃的是哪个对话** | **`\\.\pipe\codex-ipc` 广播 `thread-stream-following-changed` → `conversationId`** | `state_5.sqlite` → 按 `recency_at_ms` 排序的 `threads` |
+| **当前活跃的是哪个对话** | **`\\.\pipe\codex-ipc` 广播 `thread-stream-following-changed` → `conversationId`** | `state_5.sqlite` → 仅核对已确认的会话 ID |
 | TTFT / 轮次时长 | rollout 的 `event_msg/task_complete`（`time_to_first_token_ms`、`duration_ms`） | 无 |
 
 所有来源都以**只读**方式打开。会话文件永不被修改。没有网络访问、没有遥测、没有代理转发、没有
@@ -215,7 +215,7 @@ cache_hit_rate = Σ cached_input_tokens / Σ input_tokens × 100%
 
 | 情况 | 行为 |
 |---|---|
-| Codex 未启动 / `codex-ipc` 不存在 | 以指数退避（350 ms → 5 s）重连，不做忙等轮询；回退到 `state_5.sqlite` 并报告 `active-thread-source = sqlite-fallback` |
+| Codex 未启动 / `codex-ipc` 不存在 | 以指数退避（350 ms → 5 s）重连，不做忙等轮询；尝试读取前台桌面窗口的本地会话 URL；无法确认时显示占位符 |
 | Codex 重启 / Electron 重新加载 | 管道消失后又被重新创建；监控器自行重连并切回 `active-thread-source = ipc` |
 | `initialize` 失败或某个帧畸形 | 跳过该帧，监听器重连；一条坏消息永远不会干掉监听器 |
 | app-server / 文件不可用 | Total 与 Cache 仍能从会话文件工作；TPS 显示 `--` |
@@ -528,9 +528,7 @@ Warnings:            none
 
 字段说明：
 
-* **`Active thread source`** 是 `ipc`（由 Codex 自己的广播选定对话）、`sqlite-fallback`（由按最近
-  活跃排序的数据库选定）、`rollout`（由新建的 rollout 文件选定）或 `none`。管道重新可用后它会
-  自动切回 `ipc`。
+* **`Active thread source`** 显示 `desktop-document`、`ipc` 或手动指定的 `forced`。缺少可信路由时显示诊断原因。
 * **`Total`** 打印为 `Input + Output`，也就是字面上文档所写的那个公式，而不是载体自带的
   `total_tokens` 字段。
 * **`Merged model elapsed ms`** 是区间的*并集*，而 **`Model intervals`** 列出参与合并的时间窗 ——
@@ -704,22 +702,9 @@ schema，这样事件词汇表可以对着任何未来版本重新核对而不�
    一次。在*没有工具调用的单次长回答*期间，它保持在上一次测得的值（显示为 `~243 tok/s`），只有
    当该响应结束时才更新。这是 Codex 暴露能力的限制，不是"抹平了的猜测" —— 另一种做法是编一个
    数字出来，而这个项目拒绝那样做。
-2. **`codex-ipc` 管道是 Codex 的内部、未公开接口。** 它是唯一能得知当前显示的是哪个对话的途径，
-   而 OpenAI 可能改动它。如果它失效，状态条会回退到按 `recency_at_ms` 排序，并停止跟随切换到
-   *空闲*对话；总量与缓存仍然正确。
-3. **多窗口没有被可靠支持，也没有为了绕过它去做 hack。** 单窗口行为是正确的；打开两个 Codex 窗口
-   时，以下结论直接来自协议本身：
-   * IPC 广播*确实*能标识窗口 —— 它携带 `sourceClientId`（每个窗口一个）与 `targetClientIds` ——
-     而监控器以 `sourceClientId + hostId` 为键维护映射，因此它能跟踪哪个窗口在跟随哪个对话。
-   * 但它跟随的是**最近发生变化**的那个窗口，因为这是广播唯一提供的顺序。它无法知道哪个 Codex
-     窗口拥有操作系统焦点。
-   * 与此同时，覆盖窗口附着的是**前台** Codex 窗口的几何。所以开着两个窗口时，状态条可能贴在一个
-     窗口上，显示的却是另一个窗口的对话。
-   这一点已经尽"不向用户应用里合成输入"的前提验证到了极限：第二个窗口无法以程序方式打开
-   （`SetForegroundWindow` 被 Windows 阻止，所以击键无法安全投递），而且始终只观察到一个 Codex
-   IPC 客户端。没有加入任何脆弱的绕过方案。
-4. **"当前"线程是谁，只取决于 Codex 自己怎么报。** 如果 Codex 为某个窗口报告了一个正在跟随的
-   对话、而那个窗口并不是你在读的那个，状态条跟随的是 Codex，而不是像素。
+2. **桌面版本兼容性。** 26.1120.6357.0 可能不提供旧管道。仅接受前台桌面文档的明确本地会话 URL 或唯一的 IPC 路由。
+3. **多窗口。** 缺少前台文档 URL 且有多个 IPC 路由时，指标显示占位符。
+4. **会话验证。** 自动选择会同时核对 SQLite 元数据和 rollout 首条记录。最近更新时间不能证明窗口显示哪个会话。可用 `--thread ID` 手动指定。
 5. **极短的轮次 TPS 噪声很大。** 模型时间信号的粒度约为毫秒级，因此整个模型时间窗只有几十毫秒的
    响应算不出有意义的速度。数值仍然会显示（它确实是官方数据），调试日志会打印该时间窗供你判断。
    见 §1A 的精度表。

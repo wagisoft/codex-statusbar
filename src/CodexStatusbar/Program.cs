@@ -310,13 +310,12 @@ internal sealed class CodexIpcActiveThreadMonitor : IDisposable
     private const string SourceClientId = "codex-statusbar";
 
     private readonly object _sync = new();
-    private readonly Dictionary<string, ActiveConversation> _activeByWindow = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _activeByWindow = new(StringComparer.Ordinal);
     private CancellationTokenSource? _cancellation;
     private Task? _runner;
     private string? _activeThreadId;
     private string? _lastError;
     private bool _isConnected;
-    private long _sequence;
     private long _version;
 
     /// <summary>
@@ -565,21 +564,21 @@ internal sealed class CodexIpcActiveThreadMonitor : IDisposable
             && sourceElement.ValueKind == JsonValueKind.String
             ? sourceElement.GetString()
             : null;
-        if (string.IsNullOrWhiteSpace(conversationId) || string.IsNullOrWhiteSpace(hostId))
+        if (string.IsNullOrWhiteSpace(conversationId) || string.IsNullOrWhiteSpace(hostId) || string.IsNullOrWhiteSpace(sourceClientId))
         {
             return;
         }
 
-        // The client id identifies the window; a broadcast that omits it is still followed.
-        var key = $"{sourceClientId ?? "unattributed"}\u001f{hostId}";
+        // A broadcast must identify the window.
+        var key = $"{sourceClientId}\u001f{hostId}";
         lock (_sync)
         {
             if (followingElement.GetBoolean())
             {
-                _activeByWindow[key] = new ActiveConversation(conversationId, ++_sequence);
+                _activeByWindow[key] = conversationId;
             }
             else if (_activeByWindow.TryGetValue(key, out var active)
-                && active.ThreadId.Equals(conversationId, StringComparison.OrdinalIgnoreCase))
+                && active.Equals(conversationId, StringComparison.OrdinalIgnoreCase))
             {
                 _activeByWindow.Remove(key);
             }
@@ -653,10 +652,7 @@ internal sealed class CodexIpcActiveThreadMonitor : IDisposable
 
     private void RecomputeActiveThread()
     {
-        var nextThreadId = _activeByWindow.Values
-            .OrderByDescending(item => item.Sequence)
-            .Select(item => item.ThreadId)
-            .FirstOrDefault();
+        var nextThreadId = _activeByWindow.Count == 1 ? _activeByWindow.Values.First() : null;
         if (!string.Equals(nextThreadId, _activeThreadId, StringComparison.OrdinalIgnoreCase))
         {
             _activeThreadId = nextThreadId;
@@ -709,26 +705,23 @@ internal sealed class CodexIpcActiveThreadMonitor : IDisposable
     }
 
     private int _disposed;
-    private sealed record ActiveConversation(string ThreadId, long Sequence);
 }
 
 /// <summary>
 /// Resolves the active conversation to a rollout file and keeps an incrementally parsed view of it.
 ///
-/// The active thread comes from the IPC <c>conversationId</c>. Restart recovery reads only the last
-/// 4 MB of that thread's rollout and then tracks appends from that byte offset. If the IPC is down,
-/// the most recently viewed non-archived thread from state_5.sqlite is used instead — never an
-/// aggregate across all of ~/.codex.
+/// A foreground document route, attributed IPC event or explicit pin supplies the identity.
+/// The reader recovers cumulative usage from a bounded tail and then follows appends.
 /// </summary>
 internal sealed class TokenLogMonitor : IDisposable
 {
-    private static readonly TimeSpan StateDatabaseRefreshInterval = TimeSpan.FromSeconds(5);
+    private string? _lastCandidate;
+    private DateTime _retryAfter;
 
     private readonly string _sessionRoot;
     private readonly string _stateDatabasePath;
     private readonly FileSystemWatcher? _watcher;
     private readonly ConcurrentQueue<string> _changedPaths = new();
-    private readonly ConcurrentDictionary<string, bool> _rootSessionCache = new(StringComparer.OrdinalIgnoreCase);
 
     private RolloutReader? _reader;
     private StateThreadRecord? _stateRecord;
@@ -738,7 +731,7 @@ internal sealed class TokenLogMonitor : IDisposable
     private string _baselineSource = "none";
     private string? _cachedSignature;
     private TokenSnapshot? _lastSnapshot;
-    private DateTime _lastStateDatabaseQueryUtc = DateTime.MinValue;
+
 
     // Resolved once: enumerating processes on every poll would be wasteful, and the client's PID
     // and package version do not change while it runs.
@@ -785,15 +778,34 @@ internal sealed class TokenLogMonitor : IDisposable
     /// <summary>Bytes parsed from the current rollout file (for the debug log).</summary>
     public long RolloutOffset => _reader?.Offset ?? 0;
 
-    /// <summary>True when the active conversation came from the state_5.sqlite fallback.</summary>
-    public bool UsedStateDatabaseFallback => _selectionSource == "sqlite-fallback";
+    /// <summary>Diagnostic when automatic selection has no confirmed route.</summary>
+    public string MissingRouteReason { get; private set; } = "waiting-for-desktop-route";
+
+    private string _routeSource = "ipc";
+
+    public void ObserveDesktopRoute(ActiveThreadRouteStatus route)
+    {
+        var documentId = DesktopDocumentRoute.Read(out var singleForegroundHost);
+        ApplyRoute(route, documentId, singleForegroundHost);
+    }
+
+    public void ApplyRoute(ActiveThreadRouteStatus route, string? documentThreadId = null,
+        bool singleForegroundHost = true)
+    {
+        _routeSource = documentThreadId is null ? "ipc" : "desktop-document";
+        PreferredThreadId = documentThreadId ?? (singleForegroundHost ? route.ThreadId : null);
+        MissingRouteReason = !route.IsConnected ? "desktop-pipe-unavailable"
+            : !singleForegroundHost && route.ThreadId is not null ? "unverified-foreground-window"
+            : route.ActiveWindowCount > 1 ? "ambiguous-desktop-windows"
+            : "waiting-for-desktop-route";
+    }
 
     public TokenSnapshot? Poll(bool forceFullScan = false)
     {
         var preferred = PreferredThreadId;
         var hasPreferred = !string.IsNullOrWhiteSpace(preferred);
 
-        if (PinActiveSession && hasPreferred && _selectedThreadId is null)
+        if (IsForcedPin && hasPreferred && _selectedThreadId is null)
         {
             // --thread: pin immediately instead of waiting for a state-database round trip. Without
             // this the first poll would select an unrelated conversation from the database and the
@@ -802,18 +814,16 @@ internal sealed class TokenLogMonitor : IDisposable
         }
         else if (!PinActiveSession && hasPreferred)
         {
-            SelectPreferredRootSession(preferred!, "ipc");
+            SelectPreferredRootSession(preferred!, _routeSource);
         }
         else if (PinActiveSession && _selectedThreadId is not null)
         {
             // Pinned to one conversation: never follow another.
         }
-        else if (forceFullScan
-            || _selectedThreadId is null
-            || DateTime.UtcNow - _lastStateDatabaseQueryUtc > StateDatabaseRefreshInterval)
+        else if (_selectedThreadId is not null || _selectionSource != MissingRouteReason)
         {
-            // No IPC route (or none yet): state_5.sqlite recency order is the documented fallback.
-            SelectFromStateDatabase();
+            _lastCandidate = null;
+            SwitchActiveLog(null, null, MissingRouteReason);
         }
 
         DrainChangedPaths();
@@ -855,7 +865,7 @@ internal sealed class TokenLogMonitor : IDisposable
             return;
         }
 
-        var path = _readerPath ?? FindRolloutPath(_selectedThreadId);
+        var path = _readerPath ?? FindRolloutPath(_selectedThreadId, requireDesktopRoot: !IsForcedPin);
         if (path is null)
         {
             // Brand-new empty conversation: no rollout file yet. Show "-- tok/s", "-- tok", "Cache --"
@@ -909,10 +919,7 @@ internal sealed class TokenLogMonitor : IDisposable
             {
                 RefreshReader();
             }
-            else if (_selectedThreadId is null && IsRootDesktopSession(path))
-            {
-                SwitchActiveLog(path, ExtractThreadId(path), "rollout");
-            }
+
         }
     }
 
@@ -920,16 +927,34 @@ internal sealed class TokenLogMonitor : IDisposable
     {
         if (_selectedThreadId?.Equals(threadId, StringComparison.OrdinalIgnoreCase) == true)
         {
-            // Same conversation, but the caller is now the authority that selected it. Without this
-            // the source label would stay "sqlite-fallback" forever whenever the very first poll
-            // happened before the IPC connection came up — which is the common case, since connecting
-            // to the pipe is asynchronous while the state database answers immediately.
             _selectionSource = source;
             EnsureReader();
             return;
         }
 
-        SwitchActiveLog(FindRolloutPath(threadId, requireDesktopRoot: !IsForcedPin), threadId, source);
+        if (IsForcedPin)
+        {
+            SwitchActiveLog(FindRolloutPath(threadId, requireDesktopRoot: false), threadId, source);
+            return;
+        }
+
+        if (_lastCandidate == threadId && DateTime.UtcNow < _retryAfter)
+        {
+            return;
+        }
+        _lastCandidate = threadId;
+        _retryAfter = DateTime.UtcNow.AddSeconds(2);
+        var record = StateDatabase.TryReadDesktopUserThread(_stateDatabasePath, threadId);
+        var path = record?.RolloutPath;
+        if (path is null || !Path.IsPathFullyQualified(path)
+            || !Path.GetFullPath(path).StartsWith(Path.TrimEndingDirectorySeparator(Path.GetFullPath(_sessionRoot))
+                + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            || !IsRootDesktopSession(path, threadId))
+        {
+            SwitchActiveLog(null, null, "unverified-desktop-session");
+            return;
+        }
+        SwitchActiveLog(path, threadId, source, record);
     }
 
     /// <summary>Maps a thread id to its rollout file by searching ~/.codex/sessions recursively.</summary>
@@ -949,7 +974,7 @@ internal sealed class TokenLogMonitor : IDisposable
         try
         {
             return Directory.EnumerateFiles(_sessionRoot, $"*{threadId}.jsonl", SearchOption.AllDirectories)
-                .Where(path => !requireDesktopRoot || IsRootDesktopSession(path))
+                .Where(path => !requireDesktopRoot || IsRootDesktopSession(path, threadId))
                 .OrderByDescending(SafeGetLastWriteUtc)
                 .FirstOrDefault();
         }
@@ -964,33 +989,8 @@ internal sealed class TokenLogMonitor : IDisposable
         threadId.Length is >= 8 and <= 64
         && threadId.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
-    private void SelectFromStateDatabase()
+    private static bool IsRootDesktopSession(string path, string threadId)
     {
-        _lastStateDatabaseQueryUtc = DateTime.UtcNow;
-        var record = StateDatabase.TryReadMostRecentThread(_stateDatabasePath);
-        if (record is null || string.IsNullOrWhiteSpace(record.Id))
-        {
-            return;
-        }
-
-        if (_selectedThreadId?.Equals(record.Id, StringComparison.OrdinalIgnoreCase) == true)
-        {
-            return;
-        }
-
-        var path = !string.IsNullOrWhiteSpace(record.RolloutPath) && File.Exists(record.RolloutPath)
-            ? record.RolloutPath
-            : FindRolloutPath(record.Id);
-        SwitchActiveLog(path, record.Id, "sqlite-fallback", record);
-    }
-
-    private bool IsRootDesktopSession(string path)
-    {
-        if (_rootSessionCache.ContainsKey(path))
-        {
-            return true;
-        }
-
         try
         {
             using var stream = new FileStream(
@@ -1012,8 +1012,9 @@ internal sealed class TokenLogMonitor : IDisposable
 
             using var document = JsonDocument.Parse(firstLine);
             var root = document.RootElement;
-            if (!root.TryGetProperty("type", out var type) || type.GetString() != "session_meta"
-                || !root.TryGetProperty("payload", out var payload))
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("type", out var type)
+                || type.ValueKind != JsonValueKind.String || type.GetString() != "session_meta"
+                || !root.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object)
             {
                 return false;
             }
@@ -1028,8 +1029,14 @@ internal sealed class TokenLogMonitor : IDisposable
                 return false;
             }
 
-            _rootSessionCache[path] = true;
-            return true;
+            if (payload.TryGetProperty("thread_source", out var kind)
+                && kind.ValueKind != JsonValueKind.Null
+                && (kind.ValueKind != JsonValueKind.String || kind.GetString() != "user"))
+                return false;
+            return payload.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String
+                && string.Equals(id.GetString(), threadId, StringComparison.OrdinalIgnoreCase)
+                && payload.TryGetProperty("source", out var source) && source.ValueKind == JsonValueKind.String
+                && source.GetString() == "vscode";
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
             or JsonException)
@@ -1227,7 +1234,8 @@ internal static class HeadlessRunner
     public static int Run(CommandLineOptions options)
     {
         using var routeMonitor = new CodexIpcActiveThreadMonitor();
-        routeMonitor.Start();
+        if (string.IsNullOrWhiteSpace(options.ForcedThreadId))
+            routeMonitor.Start();
         using var monitor = new TokenLogMonitor(options.SessionRoot);
         var diagnostics = new DebugDiagnostics(options.Debug);
 
@@ -1279,14 +1287,7 @@ internal static class HeadlessRunner
         if (string.IsNullOrWhiteSpace(options.ForcedThreadId))
         {
             var route = routeMonitor.GetStatus();
-            if (!string.IsNullOrWhiteSpace(route.ThreadId))
-            {
-                monitor.PreferredThreadId = route.ThreadId;
-            }
-            else if (!route.IsConnected)
-            {
-                monitor.PreferredThreadId = null;
-            }
+            monitor.ObserveDesktopRoute(route);
         }
 
         var snapshot = monitor.Poll();

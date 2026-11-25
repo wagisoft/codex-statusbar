@@ -7,8 +7,7 @@ internal sealed record StateThreadRecord(
     string Id,
     string? Title,
     string? RolloutPath,
-    long TokensUsed,
-    long RecencyAtMs);
+    long TokensUsed);
 
 /// <summary>
 /// Read-only access to <c>state_5.sqlite</c> through the SQLite library that ships with Windows
@@ -22,7 +21,7 @@ internal static class StateDatabase
     private const int SqliteDone = 101;
     private const int SqliteOpenReadOnly = 0x00000001;
 
-    private const string ThreadColumns = "id, title, rollout_path, tokens_used, recency_at_ms";
+    private const string ThreadColumns = "id, title, rollout_path, tokens_used";
 
     public static string ResolvePath()
     {
@@ -51,10 +50,7 @@ internal static class StateDatabase
             if (!string.IsNullOrWhiteSpace(home))
             {
                 var candidate = Path.Combine(home, "state_5.sqlite");
-                if (File.Exists(candidate))
-                {
-                    return candidate;
-                }
+                return candidate;
             }
         }
 
@@ -74,16 +70,14 @@ internal static class StateDatabase
             threadId);
     }
 
-    /// <summary>
-    /// The most recently viewed non-archived thread. This is the documented fallback when the
-    /// Codex IPC pipe is unavailable — never an aggregate across all of ~/.codex.
-    /// </summary>
-    public static StateThreadRecord? TryReadMostRecentThread(string databasePath) =>
-        QuerySingle(
-            databasePath,
-            $"SELECT {ThreadColumns} FROM threads WHERE archived = 0 " +
-            "ORDER BY recency_at_ms DESC LIMIT 1",
-            null);
+    // Unknown schemas fail closed. Only an independently observed route supplies the ID.
+    public static StateThreadRecord? TryReadDesktopUserThread(string databasePath, string threadId) =>
+        QuerySingle(databasePath,
+            $"SELECT {ThreadColumns} FROM threads WHERE id = $id AND archived = 0 " +
+            "AND source = 'vscode' AND (thread_source IS NULL OR thread_source = 'user') " +
+            "AND (originator IS NULL OR originator = 'Codex Desktop') " +
+            "AND agent_role IS NULL AND agent_path IS NULL AND agent_nickname IS NULL " +
+            "AND attached_thread_parent_id IS NULL LIMIT 1", threadId);
 
     private static StateThreadRecord? QuerySingle(string databasePath, string sql, string? parameter)
     {
@@ -129,8 +123,7 @@ internal static class StateDatabase
                 ReadText(statement, 0) ?? string.Empty,
                 ReadText(statement, 1),
                 ReadText(statement, 2),
-                sqlite3_column_int64(statement, 3),
-                sqlite3_column_int64(statement, 4));
+                sqlite3_column_int64(statement, 3));
         }
         catch (Exception exception) when (exception is DllNotFoundException
             or EntryPointNotFoundException
