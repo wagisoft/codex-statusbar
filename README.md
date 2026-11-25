@@ -1,5 +1,68 @@
 # CodexStatusbar
 
+## Usage limits (Phase 4)
+
+The tray's **Visible fields** menu offers independent 5-hour and weekly remaining percentages and
+reset countdowns. Remaining percentages are enabled by default. The overlay drops countdowns
+first as space narrows. The scrollable **Usage limits** section shows the latest reported used
+and remaining percentages, reset times in Windows local time, snapshot age and the source.
+Colors are local display hints. Green is above 30%, yellow is above 10% through 30%, and red is
+10% or below.
+
+The source is the selected chat's JSONL `event_msg` with `payload.type = token_count` and
+`payload.rate_limits.limit_id = codex`. A window identifies itself with `window_minutes`,
+`used_percent` and optional Unix-seconds `resets_at`. The event's UTC timestamp orders snapshots.
+The verified local samples used 300 and 10,080 minutes. The classifier follows the CLI's ±5%
+duration buckets and requires a matching duration for each displayed label. The CLI also has
+positional fallbacks for other durations. The overlay leaves those windows unlabelled so it can
+avoid displaying a different quota as 5-hour or weekly.
+
+Remaining percentage is `clamp(100 − used, 0, 100)` and formats to a whole percent with midpoint
+rounding to even, as in the CLI status card. Missing or invalid percentages remain unavailable.
+Snapshots older than 30 minutes or without a reset are **Stale**. At reset the window is
+**Awaiting refresh** until a newer verified snapshot arrives; prior percentages are labelled
+historical in details. **Unavailable** means no usable window is recorded in the parsed tail.
+**Unsupported** means that only unrecognised limit data was found there. Compact `~` marks stale
+values, and `wait` marks a past reset. The local age cutoff and reset handling are overlay policies.
+
+The limit event has no account identifier. Newer snapshots in other local rollouts cannot safely
+be attributed to the selected chat's account or limit scope, so the overlay stays with the selected
+rollout. The documented App Server account method fetches limits and is outside this offline path.
+The regular incremental reader handles limits alongside tokens. The clock updates the displayed
+countdown and freshness independently of file parsing.
+
+CLI reference revision `76696132f04983e6283fdc97d8e7b11a4ca59f9b`.
+[Status line](https://github.com/openai/codex/blob/76696132f04983e6283fdc97d8e7b11a4ca59f9b/codex-rs/tui/src/chatwidget/status_surfaces.rs),
+[status controls](https://github.com/openai/codex/blob/76696132f04983e6283fdc97d8e7b11a4ca59f9b/codex-rs/tui/src/chatwidget/status_controls.rs),
+[window classification](https://github.com/openai/codex/blob/76696132f04983e6283fdc97d8e7b11a4ca59f9b/codex-rs/tui/src/chatwidget/rate_limits.rs),
+[status card](https://github.com/openai/codex/blob/76696132f04983e6283fdc97d8e7b11a4ca59f9b/codex-rs/tui/src/status/card.rs),
+[percentage formatting](https://github.com/openai/codex/blob/76696132f04983e6283fdc97d8e7b11a4ca59f9b/codex-rs/tui/src/status/rate_limits.rs),
+[App Server documentation](https://developers.openai.com/codex/app-server).
+
+## Extended token statistics (Phase 3)
+
+The compact overlay can show generation speed, CLI-style `used`, input, output and cache hit rate.
+Use **Visible fields** in the tray to toggle metrics. As the composer gets narrower, the strip
+shortens labels, removes input and output together, then drops speed and cache before hiding.
+Click the strip to expand token details with full counts. A tilde marks held generation speed.
+
+- CLI `used` is uncached input plus output. `in` includes the cache, and `out` includes reasoning.
+  The detail row **Total tokens** shows the raw cumulative thread total. If a split is unavailable
+  and a raw total is recorded, the strip labels the fallback `total`.
+- Cache hit rate divides cached input by all input. Missing splits are shown as N/A in details.
+- Current context comes from the latest reported context total, with remaining tokens calculated
+  against the reported window size. A compaction marker clears stale context until a new reading.
+  Context utilization complements the CLI’s rounded remaining percentage after its 12,000-token baseline adjustment.
+- Last turn tokens measure the increase in the cumulative total across an observed completed turn.
+  A rollout tail without the opening baseline leaves this value unavailable.
+- Generation speed uses output tokens and the union of model output intervals. It is independent
+  of session totals and CLI token formatting. Incomplete timing can leave the speed unavailable.
+
+See Codex's [status line renderer](https://github.com/openai/codex/blob/main/codex-rs/tui/src/chatwidget/status_surfaces.rs)
+and [TokenUsage implementation](https://github.com/openai/codex/blob/main/codex-rs/tui/src/token_usage.rs).
+The earlier measurement examples below predate Phase 3 and show the original compact format.
+
+
 <https://github.com/dongyue-19/codex-statusbar> · MIT licensed · **v1.0.0-rc3** (release candidate,
 feature-frozen)
 
@@ -483,13 +546,11 @@ While docked the strip needs no adjustment at all. To move it by hand:
 ### Everything else
 
 * **Hides** when Codex is minimised, and when Codex is not the foreground window.
-* **Locked means completely click-through.** `WS_EX_TRANSPARENT` plus `WS_EX_NOACTIVATE` are both set
-  while locked, and `WM_NCHITTEST` answers `HTTRANSPARENT` unconditionally — so *every* pixel of the
-  strip, the glyphs included, lets the mouse reach Codex. Alpha-based hit testing alone was not enough:
-  it passed clicks through the transparent pixels but swallowed the ones that landed on the numbers.
-  Verified by sampling 72 points across the strip in each of eight window geometries; none resolve to
-  the overlay. Both flags are dropped by `BeginEditMode` and restored by `EndEditMode`, and only in
-  **Adjust Position** does the strip take the mouse at all.
+* **Click the strip to toggle token details.** The strip and panel accept clicks without activating
+  the overlay. The rest of the window passes mouse input through. Click away or press Escape to close.
+  When the working area fits only part of the panel, click inside it or use the mouse wheel to see
+  the remaining rows.
+
 * **The detail panel moved to the tray.** Since the locked strip no longer receives clicks, the panel
   is opened from **tray → `详情面板 · 展开 / 收起`**. Same panel, same toggle.
 * **Never steals focus**: `WS_EX_TOOLWINDOW` so it does not appear in Alt+Tab, and `WM_MOUSEACTIVATE`
